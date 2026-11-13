@@ -6,7 +6,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import mqtt from 'mqtt';
-import { TYPES, applyValues, bridgeDeviceEntry, buildDiscovery, lightHex, statePayload } from './devices.js';
+import { TYPES, applyValues, bridgeDeviceEntry, buildDiscovery, lightHex, observables, statePayload } from './devices.js';
 
 export const VERSION = '2.6.3-sim';
 const LOG_SIZE = 300;
@@ -605,7 +605,7 @@ export class Simulator extends EventEmitter {
     const { password, ...config } = this.config;
     const types = {};
     for (const [key, t] of Object.entries(TYPES)) {
-      types[key] = { label: t.label, vendor: t.vendor, model: t.model, description: t.description, props: t.props, actions: t.actions || [], battery: t.powerSource === 'Battery' };
+      types[key] = { label: t.label, vendor: t.vendor, model: t.model, description: t.description, props: t.props, observe: observables(key), actions: t.actions || [], battery: t.powerSource === 'Battery' };
     }
     return {
       version: VERSION,

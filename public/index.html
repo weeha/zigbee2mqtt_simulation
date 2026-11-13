@@ -33,8 +33,12 @@
 
     <section id="tab-scenarios" hidden>
       <div class="bar">
-        <p class="hint">A scenario replays things happening in the house: windows opening, temperatures changing, buttons being pressed.</p>
-        <button id="btn-scenario" class="primary">+ New scenario</button>
+        <p class="hint">A scenario replays things happening in the house: windows opening, temperatures changing, buttons being pressed. Add "Expect" steps to check that your automations react.</p>
+        <div style="display: flex; flex-wrap: wrap; gap: 10px; align-items: center">
+          <span id="test-summary" class="summary"></span>
+          <button id="btn-tests" title="Runs every scenario that has an Expect step, one after the other" disabled>▶ Run all tests</button>
+          <button id="btn-scenario" class="primary">+ New scenario</button>
+        </div>
       </div>
       <div id="scenario-list"></div>
     </section>

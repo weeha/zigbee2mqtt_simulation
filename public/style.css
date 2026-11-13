@@ -137,6 +137,14 @@ input[type=color] { width: 44px; height: 28px; padding: 0; border: 1px solid var
 .scenario li { padding: 1px 0; }
 .scenario li.now { color: var(--accent); font-weight: 600; }
 .scenario li.missing { color: var(--bad); }
+.scenario li.passed .mark { color: var(--ok); font-weight: 700; }
+.scenario li.failed { color: var(--bad); }
+.scenario .why { font-size: 12px; }
+.badge.passed { background: var(--ok); color: #fff; }
+.badge.failed { background: var(--bad); color: #fff; }
+.summary { font-size: 12px; color: var(--muted); white-space: nowrap; }
+.summary.passed { color: var(--ok); }
+.summary.failed { color: var(--bad); }
 
 .steps { display: flex; flex-direction: column; gap: 6px; margin: 8px 0; }
 .step { display: flex; gap: 6px; align-items: center; background: var(--surface-2); border-radius: 8px; padding: 6px; flex-wrap: wrap; }

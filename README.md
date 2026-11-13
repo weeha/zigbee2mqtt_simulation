@@ -45,11 +45,42 @@ The **Scenarios** tab holds scripted sequences. A step can
 - set a value (open a window, set 19 °C, switch a light at "the wall"),
 - change a value gradually (temperature falls to 16 °C over 40 s),
 - press a button,
-- take a device offline / bring it back.
+- take a device offline / bring it back,
+- expect a value (see below).
 
 Scenarios can loop and several can run at once. They only play the *physical world*; reacting
 to it (switching the heating off when a window opens ...) is the job of the automations you
 are testing.
+
+### Testing automations
+
+An **Expect** step turns a scenario into a test. It waits until a device reports the expected
+value and fails if that does not happen in time:
+
+```text
+1. Bedroom Window: contact → open
+2. Expect Bedroom Thermostat: setpoint ≤ 12 °C within 20 s
+3. Bedroom Window: contact → closed
+4. Expect Bedroom Thermostat: setpoint ≥ 20 °C within 20 s
+```
+
+- Numbers can be compared with `is`, `is not`, `<`, `≤`, `>`, `≥`; everything else with `is` / `is not`.
+  A light's color matches approximately.
+- Besides the values you can set, a test can check what a device reports on its own: a plug's
+  power and energy, a thermostat's running state, a blind's open / closed state.
+- A failed step does not end the scenario, so the steps after it can still tidy up. The
+  scenario is marked **passed** or **failed**, with the reason next to the failed step.
+- **Run all tests** runs every scenario with an Expect step, one after the other. Looping
+  scenarios are skipped.
+
+The same from the command line, against a running simulator - the exit code is 1 if a test fails:
+
+```bash
+npm run scenarios                         # http://localhost:8099
+npm run scenarios -- http://host:8099     # or SIM_URL=...
+```
+
+Results are kept until the simulator restarts or the scenario is edited.
 
 ## MQTT behaviour
 
@@ -99,4 +130,8 @@ PATCH  /api/devices/:id            {state: {temperature: 19}, available, friendl
 POST   /api/devices/:id/action     {action: "single"}
 DELETE /api/devices/:id
 POST   /api/scenarios/:id/run      /stop
+POST   /api/scenarios/:id/run?wait=1   answers when the scenario has finished: {status: passed|failed|stopped|done, checks, failures}
+POST   /api/tests/run              runs all test scenarios and answers {ok, passed, failed, results}
 ```
+
+An expect step looks like `{type: "expect", device, property, op: eq|ne|lt|le|gt|ge, value, seconds}`.

@@ -15,7 +15,7 @@ const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css
 
 const sim = new Simulator(process.env.DATA_DIR || path.join(ROOT, 'data'));
 const scenarios = new ScenarioRunner(sim);
-const snapshot = () => ({ ...sim.snapshot(), running: scenarios.status() });
+const snapshot = () => ({ ...sim.snapshot(), running: scenarios.status(), results: scenarios.resultsView() });
 
 // ---------------------------------------------------------------- live updates (server-sent events)
 const clients = new Set();
@@ -47,7 +47,15 @@ route('POST', '/api/devices/:id/action', (p, body) => sim.pressButton(p.id, body
 route('POST', '/api/scenarios', (p, body) => scenarios.save(null, body));
 route('PUT', '/api/scenarios/:id', (p, body) => scenarios.save(p.id, body));
 route('DELETE', '/api/scenarios/:id', (p) => scenarios.remove(p.id));
-route('POST', '/api/scenarios/:id/run', (p) => { scenarios.get(p.id); scenarios.run(p.id).catch((err) => console.error(err)); });
+route('POST', '/api/scenarios/:id/run', (p, body, query) => {
+  scenarios.get(p.id);
+  if (scenarios.running.has(p.id)) throw Object.assign(new Error('This scenario is already running'), { status: 409 });
+  const done = scenarios.run(p.id);
+  // "wait" answers only when the scenario has finished - with its result.
+  if (body.wait || query.has('wait')) return done;
+  done.catch((err) => console.error(err));
+});
+route('POST', '/api/tests/run', () => scenarios.runTests());
 route('POST', '/api/scenarios/:id/stop', (p) => scenarios.stop(p.id));
 
 function readBody(req) {
@@ -94,7 +102,7 @@ const server = http.createServer(async (req, res) => {
         const m = r.method === req.method && r.regex.exec(pathname);
         if (!m) continue;
         const body = req.method === 'GET' ? {} : await readBody(req);
-        return json(res, 200, await r.handler(m.groups || {}, body));
+        return json(res, 200, await r.handler(m.groups || {}, body, url.searchParams));
       }
       return json(res, 404, { error: 'Not found' });
     } catch (err) {

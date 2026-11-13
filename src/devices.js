@@ -36,6 +36,7 @@ const EXP_STATE = { type: 'binary', name: 'state', label: 'State', property: 'st
 // props:     what the web UI / scenarios can change ("sim: true" lives in device.sim instead of the state)
 // settable:  what may be changed over MQTT (<name>/set); 'all' or a list of attributes
 // simFields: simulation settings that the web UI may change
+// observe:   read-only values a scenario can check in addition to the props
 export const TYPES = {
   light: {
     label: 'Color light',
@@ -107,6 +108,10 @@ export const TYPES = {
       { name: 'state', label: 'State', kind: 'enum', values: ['ON', 'OFF'], toggle: true },
       { name: 'load', label: 'Connected load', kind: 'number', min: 0, max: 3500, step: 1, unit: 'W', sim: true },
     ],
+    observe: [
+      { name: 'power', label: 'Power', kind: 'number', min: 0, max: 3500, unit: 'W' },
+      { name: 'energy', label: 'Energy', kind: 'number', min: 0, max: 100000, unit: 'kWh' },
+    ],
     exposes: [
       { type: 'switch', features: [{ ...EXP_STATE, description: 'On/off state of the switch' }] },
       numeric('power', 'Power', 'W', 'Instantaneous measured power'),
@@ -135,6 +140,7 @@ export const TYPES = {
       { name: 'system_mode', label: 'Mode', kind: 'enum', values: ['off', 'auto', 'heat'] },
       P_BATTERY,
     ],
+    observe: [{ name: 'running_state', label: 'Running state', kind: 'enum', values: ['idle', 'heat'] }],
     exposes: [
       {
         type: 'climate',
@@ -426,6 +432,23 @@ export function statePayload(dev) {
   const s = { ...dev.state };
   if (dev.type === 'plug') s.energy = round(s.energy, 3);
   return s;
+}
+
+/** What a scenario can check on a device of this type: the reported values, without pure commands. */
+export function observables(type) {
+  const t = TYPES[type];
+  const own = t.props.filter((p) => !p.sim).map((p) => {
+    if (p.kind !== 'enum') return p;
+    const label = type === 'cover' && p.name === 'state' ? 'State' : p.label;
+    return { ...p, label, values: p.values.filter((v) => v !== 'TOGGLE' && v !== 'STOP') };
+  });
+  return [...own, ...(t.observe || [])];
+}
+
+/** Current value of something from observables(); a light's colour is reported as #rrggbb. */
+export function observe(dev, property) {
+  if (dev.type === 'light' && property === 'color') return lightHex(dev.state);
+  return dev.state[property];
 }
 
 /** Colour to show in the web UI for a light. */

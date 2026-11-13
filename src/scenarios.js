@@ -1,10 +1,36 @@
 // Scenarios: scripted sequences of "things happening in the house"
 // (a window opens, the temperature falls, somebody presses a button ...).
 
+// An "expect" step turns a scenario into a test: it waits until a device reports
+// the expected value - typically because an automation reacted - or fails.
+
 import crypto from 'node:crypto';
+import { observables, observe } from './devices.js';
 
 const fail = (message, status = 400) => Object.assign(new Error(message), { status });
-const STEP_TYPES = ['wait', 'set', 'ramp', 'press', 'availability'];
+const STEP_TYPES = ['wait', 'set', 'ramp', 'press', 'availability', 'expect'];
+const OPS = { eq: '=', ne: '≠', lt: '<', le: '≤', gt: '>', ge: '≥' };
+const COLOR_TOLERANCE = 48; // colours survive the trip through x/y only approximately
+const MAX_FAILURES = 50;
+
+const rgb = (hex) => [1, 3, 5].map((i) => parseInt(String(hex).slice(i, i + 2), 16));
+
+/** Does the value a device reports satisfy an expectation? */
+function holds(kind, actual, op, expected) {
+  if (kind === 'color') {
+    const [a, b] = [rgb(actual), rgb(expected)];
+    const near = Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]) <= COLOR_TOLERANCE;
+    return op === 'ne' ? !near : near;
+  }
+  if (kind === 'number') {
+    const [a, b] = [Number(actual), Number(expected)];
+    if (!Number.isFinite(a) || !Number.isFinite(b)) return false;
+    const same = Math.abs(a - b) < 1e-9;
+    return { eq: same, ne: !same, lt: a < b && !same, le: a < b || same, gt: a > b && !same, ge: a > b || same }[op];
+  }
+  const same = String(actual).toLowerCase() === String(expected).toLowerCase();
+  return op === 'ne' ? !same : op === 'eq' && same; // texts and booleans have no order
+}
 
 function cleanStep(step) {
   if (!step || !STEP_TYPES.includes(step.type)) throw fail('Invalid scenario step');
@@ -20,13 +46,24 @@ function cleanStep(step) {
       return { type: 'press', device: String(step.device || ''), action: String(step.action || 'single') };
     case 'availability':
       return { type: 'availability', device: String(step.device || ''), available: !!step.available };
+    case 'expect':
+      if (!(step.op in OPS)) throw fail(`Unknown comparison '${step.op}'`);
+      return { type: 'expect', device: String(step.device || ''), property: String(step.property || ''), op: step.op, value: step.value, seconds };
   }
 }
+
+const isTest = (scenario) => scenario.steps.some((s) => s.type === 'expect');
 
 export class ScenarioRunner {
   constructor(sim) {
     this.sim = sim;
     this.running = new Map(); // scenario id -> { abort, step, wake }
+    this.results = new Map(); // scenario id -> result of the current / last run (not persisted)
+    this.suite = false; // "run all tests" in progress
+  }
+
+  resultsView() {
+    return Object.fromEntries(this.results);
   }
 
   status() {
@@ -49,6 +86,7 @@ export class ScenarioRunner {
     let scenario;
     if (id) {
       scenario = Object.assign(this.get(id), data);
+      if (!this.running.has(id)) this.results.delete(id); // the old result belongs to the old steps
     } else {
       scenario = { id: crypto.randomBytes(6).toString('hex'), ...data };
       this.sim.scenarios.push(scenario);
@@ -60,7 +98,8 @@ export class ScenarioRunner {
   remove(id) {
     this.get(id);
     this.stop(id);
-    this.sim.scenarios = this.sim.scenarios.filter((s) => s.id !== id);
+    this.results.delete(id);
+    this.sim.scenarios =this.sim.scenarios.filter((s) => s.id !== id);
     this.sim.changed();
   }
 
@@ -85,28 +124,83 @@ export class ScenarioRunner {
 
   async run(id) {
     const scenario = this.get(id);
-    if (this.running.has(id)) return;
+    if (this.running.has(id)) return null;
     const ctl = { abort: false, step: 0 };
+    // steps: outcome per step of the current pass; checks: expectations met so far.
+    const result = { status: 'running', started: Date.now(), checks: 0, failures: [], steps: {} };
     this.running.set(id, ctl);
+    this.results.set(id, result);
     try {
       do {
         const started = Date.now();
         const steps = [...scenario.steps];
+        result.steps = {};
         for (let i = 0; i < steps.length && !ctl.abort; i++) {
           ctl.step = i;
           this.sim.emit('change');
           try {
             await this.exec(steps[i], ctl);
+            if (steps[i].type === 'expect' && !ctl.abort) {
+              result.checks++;
+              result.steps[i] = 'passed';
+            }
           } catch (err) {
+            // A failed step does not end the scenario: the steps after it often tidy up.
             console.warn(`Scenario '${scenario.name}', step ${i + 1}: ${err.message}`);
+            result.steps[i] = 'failed';
+            if (result.failures.length < MAX_FAILURES) result.failures.push({ step: i, message: err.message });
           }
         }
         // A looping scenario without any waiting would spin forever.
         if (scenario.loop && Date.now() - started < 500) await this.sleep(ctl, 500);
       } while (scenario.loop && !ctl.abort && this.sim.scenarios.includes(scenario));
     } finally {
+      result.finished = Date.now();
+      result.status = result.failures.length ? 'failed' : ctl.abort ? 'stopped' : result.checks ? 'passed' : 'done';
       this.running.delete(id);
       this.sim.emit('change');
+    }
+    return result;
+  }
+
+  /** Runs every scenario that contains expectations, one after the other. */
+  async runTests() {
+    if (this.suite) throw fail('The tests are already running', 409);
+    const tests = this.sim.scenarios.filter((s) => isTest(s) && !s.loop);
+    if (!tests.length) throw fail('No scenario contains an "Expect" step yet');
+    this.suite = true;
+    const results = [];
+    try {
+      for (const scenario of tests) {
+        if (!this.sim.scenarios.includes(scenario)) continue; // deleted meanwhile
+        const result = await this.run(scenario.id);
+        if (!result) continue; // already running on its own
+        results.push({ id: scenario.id, name: scenario.name, status: result.status, seconds: (result.finished - result.started) / 1000, failures: result.failures });
+        if (result.status === 'stopped') break;
+      }
+    } finally {
+      this.suite = false;
+    }
+    const count = (status) => results.filter((r) => r.status === status).length;
+    return { ok: results.length > 0 && results.every((r) => r.status === 'passed'), passed: count('passed'), failed: count('failed'), stopped: count('stopped'), results };
+  }
+
+  async expect(step, ctl) {
+    const sim = this.sim;
+    const deadline = Date.now() + step.seconds * 1000;
+    for (;;) {
+      const dev = sim.getDevice(step.device);
+      const prop = observables(dev.type).find((p) => p.name === step.property);
+      if (!prop) throw fail(`${dev.friendly_name} has no '${step.property}' to check`);
+      const actual = observe(dev, step.property);
+      if (holds(prop.kind, actual, step.op, step.value)) return;
+      if (ctl.abort) return;
+      const left = deadline - Date.now();
+      if (left <= 0) {
+        const unit = prop.unit ? ` ${prop.unit}` : '';
+        throw fail(`${dev.friendly_name}: expected ${prop.label.toLowerCase()} ${OPS[step.op]} ${step.value}${unit}${step.seconds ? ` within ${step.seconds} s` : ''}, but it was ${actual}${unit}`);
+      }
+      await this.sleep(ctl, Math.min(100, left));
     }
   }
 
@@ -121,6 +215,8 @@ export class ScenarioRunner {
         return sim.pressButton(step.device, step.action);
       case 'availability':
         return void sim.updateDevice(step.device, { available: step.available });
+      case 'expect':
+        return this.expect(step, ctl);
       case 'ramp': {
         const dev = sim.getDevice(step.device);
         const from = Number(dev.state[step.property] ?? dev.sim[step.property]);
@@ -252,6 +348,25 @@ export class ScenarioRunner {
           { type: 'set', device: id['Bathroom Leak Sensor'], property: 'water_leak', value: true },
           { type: 'wait', seconds: 30 },
           { type: 'set', device: id['Bathroom Leak Sensor'], property: 'water_leak', value: false },
+        ],
+      },
+      {
+        name: 'Test: the bedroom blind closes and opens again',
+        steps: [
+          { type: 'set', device: id['Bedroom Blind'], property: 'state', value: 'CLOSE' },
+          { type: 'expect', device: id['Bedroom Blind'], property: 'position', op: 'eq', value: 0, seconds: 15 },
+          { type: 'set', device: id['Bedroom Blind'], property: 'state', value: 'OPEN' },
+          { type: 'expect', device: id['Bedroom Blind'], property: 'position', op: 'eq', value: 100, seconds: 15 },
+        ],
+      },
+      {
+        name: 'Test: heating goes down while the bedroom window is open (needs your automation)',
+        steps: [
+          { type: 'set', device: id['Bedroom Thermostat'], property: 'occupied_heating_setpoint', value: 21 },
+          { type: 'set', device: id['Bedroom Window'], property: 'contact', value: false },
+          { type: 'expect', device: id['Bedroom Thermostat'], property: 'occupied_heating_setpoint', op: 'le', value: 12, seconds: 20 },
+          { type: 'set', device: id['Bedroom Window'], property: 'contact', value: true },
+          { type: 'expect', device: id['Bedroom Thermostat'], property: 'occupied_heating_setpoint', op: 'ge', value: 20, seconds: 20 },
         ],
       },
       {

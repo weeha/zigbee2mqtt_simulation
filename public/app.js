@@ -497,9 +497,15 @@ function createDemo() {
 
 // ---------------------------------------------------------------- scenarios
 
-const STEP_TYPES = [['wait', 'Wait'], ['set', 'Set value'], ['ramp', 'Change gradually'], ['press', 'Press button'], ['availability', 'Go offline / online']];
+const STEP_TYPES = [['wait', 'Wait'], ['set', 'Set value'], ['ramp', 'Change gradually'], ['press', 'Press button'], ['availability', 'Go offline / online'], ['expect', 'Expect (test)']];
+const OPS = { eq: 'is', ne: 'is not', lt: '<', le: '≤', gt: '>', ge: '≥' };
 const propsOf = (dev) => S.types[dev.type].props;
 const propOf = (dev, name) => propsOf(dev).find((p) => p.name === name);
+/** What an "expect" step can check: the values a device reports. */
+const observeOf = (dev) => S.types[dev.type].observe;
+const obsOf = (dev, name) => observeOf(dev).find((p) => p.name === name);
+const opsFor = (prop) => Object.keys(OPS).filter((op) => prop.kind === 'number' || op === 'eq' || op === 'ne');
+const isTest = (sc) => sc.steps.some((s) => s.type === 'expect');
 
 function describeStep(step) {
   if (step.type === 'wait') return { text: `Wait ${step.seconds} s` };
@@ -508,9 +514,13 @@ function describeStep(step) {
   const name = dev.friendly_name;
   if (step.type === 'press') return { text: `${name}: press "${step.action}"` };
   if (step.type === 'availability') return { text: `${name}: goes ${step.available ? 'online' : 'offline'}` };
-  const p = propOf(dev, step.property);
+  const p = step.type === 'expect' ? obsOf(dev, step.property) : propOf(dev, step.property);
   const label = p?.label.toLowerCase() || step.property;
   const unit = p?.unit ? ` ${p.unit}` : '';
+  if (step.type === 'expect') {
+    const expected = p?.kind === 'bool' ? p.labels[String(step.value)] : `${step.value}${unit}`;
+    return { text: `Expect ${name}: ${label} ${OPS[step.op]} ${expected}${step.seconds ? ` within ${step.seconds} s` : ''}` };
+  }
   if (step.type === 'ramp') return { text: `${name}: ${label} → ${step.to}${unit} over ${step.seconds} s` };
   const value = p?.kind === 'bool' ? p.labels[String(step.value)] : `${step.value}${unit}`;
   return { text: `${name}: ${label} → ${value}` };
@@ -519,10 +529,16 @@ function describeStep(step) {
 let scenarioSignature = '';
 function renderScenarios() {
   const names = S.devices.map((d) => [d.id, d.friendly_name]);
-  const signature = JSON.stringify([S.scenarios, S.running, names]);
+  const signature = JSON.stringify([S.scenarios, S.running, S.results, names]);
   if (signature === scenarioSignature) return;
   scenarioSignature = signature;
   const list = $('#scenario-list');
+  const tests = S.scenarios.filter((sc) => isTest(sc) && !sc.loop);
+  const count = (status) => tests.filter((sc) => S.results[sc.id]?.status === status).length;
+  $('#btn-tests').disabled = !tests.length || tests.some((sc) => sc.id in S.running);
+  $('#test-summary').textContent = !tests.length ? ''
+    : `${tests.length} test${tests.length === 1 ? '' : 's'}` + (count('passed') || count('failed') ? ` · ${count('passed')} passed · ${count('failed')} failed` : '');
+  $('#test-summary').className = 'summary' + (count('failed') ? ' failed' : count('passed') === tests.length && tests.length ? ' passed' : '');
   if (!S.scenarios.length) {
     list.replaceChildren(h('div', { class: 'empty' }, h('strong', {}, 'No scenarios yet'),
       'Create one, or use "Create demo home" to get a few examples.'));
@@ -530,9 +546,12 @@ function renderScenarios() {
   }
   list.replaceChildren(...S.scenarios.map((sc) => {
     const running = sc.id in S.running;
+    const result = S.results[sc.id];
+    const verdict = !running && result && ['passed', 'failed', 'stopped'].includes(result.status) && result.status;
     return h('div', { class: 'scenario' + (running ? ' running' : '') },
       h('header', {},
-        h('div', {}, h('b', {}, sc.name), sc.loop && h('span', { class: 'badge' }, 'loops'), running && h('span', { class: 'badge' }, 'running')),
+        h('div', {}, h('b', {}, sc.name), isTest(sc) && h('span', { class: 'badge' }, 'test'), sc.loop && h('span', { class: 'badge' }, 'loops'), running && h('span', { class: 'badge' }, 'running'),
+          verdict && h('span', { class: `badge ${verdict}`, title: new Date(result.finished).toLocaleTimeString() }, verdict)),
         h('div', { class: 'actions' },
           running
             ? h('button', { onclick: () => run('POST', `/api/scenarios/${sc.id}/stop`) }, '■ Stop')
@@ -543,7 +562,10 @@ function renderScenarios() {
           } }, icon('trash', 16)))),
       h('ol', {}, sc.steps.map((step, i) => {
         const d = describeStep(step);
-        return h('li', { class: (running && S.running[sc.id] === i ? 'now ' : '') + (d.missing ? 'missing' : '') }, d.text);
+        const outcome = result?.steps[i];
+        const failure = outcome === 'failed' && result.failures.findLast((f) => f.step === i);
+        return h('li', { class: [running && S.running[sc.id] === i && 'now', d.missing && 'missing', outcome].filter(Boolean).join(' ') },
+          d.text, outcome === 'passed' && h('span', { class: 'mark' }, ' ✓'), failure && h('div', { class: 'why' }, `✗ ${failure.message}`));
       })));
   }));
 }
@@ -563,6 +585,15 @@ function fixStep(step) {
     const p = propsOf(dev)[0];
     step.property = p.name;
     step.value = defaultValue(p, dev);
+  }
+  if (step.type === 'expect') {
+    let p = obsOf(dev, step.property);
+    if (!p) {
+      p = observeOf(dev)[0];
+      step.property = p.name;
+      step.value = defaultValue(p, dev);
+    }
+    if (!opsFor(p).includes(step.op)) step.op = 'eq';
   }
   if (step.type === 'ramp' && propOf(dev, step.property)?.kind !== 'number') {
     const p = propsOf(dev).find((x) => x.kind === 'number');
@@ -589,7 +620,7 @@ function scenarioDialog(scenario) {
     steps.replaceChildren(...draft.steps.map((step, i) => {
       const row = h('div', { class: 'step' },
         select(STEP_TYPES, step.type, (type) => {
-          draft.steps[i] = { type, seconds: 5, device: step.device || '', action: 'single', available: false };
+          draft.steps[i] = { type, seconds: type === 'expect' ? 30 : 5, device: step.device || '', action: 'single', available: false, op: 'eq' };
           fixStep(draft.steps[i]);
           renderSteps();
         }));
@@ -615,6 +646,19 @@ function scenarioDialog(scenario) {
           const prop = propOf(dev, step.property);
           if (step.type === 'set') row.append(h('span', {}, '→'), valueInput(step, prop), prop.unit ? h('span', {}, prop.unit) : '');
           else row.append(h('span', {}, 'to'), num(step, 'to', { min: prop.min, max: prop.max }), h('span', {}, `${prop.unit || ''} over`), num(step, 'seconds', { min: 0 }), h('span', {}, 's'));
+        }
+        if (dev && step.type === 'expect') {
+          row.append(select(observeOf(dev).map((p) => [p.name, p.label]), step.property, (property) => {
+            step.property = property;
+            step.value = defaultValue(obsOf(dev, property), dev);
+            fixStep(step);
+            renderSteps();
+          }));
+          const prop = obsOf(dev, step.property);
+          row.append(
+            select(opsFor(prop).map((op) => [op, OPS[op]]), step.op, (op) => (step.op = op)),
+            valueInput(step, prop), prop.unit ? h('span', {}, prop.unit) : '',
+            h('span', { title: 'How long the automation under test may take. 0 = it must be true right now.' }, 'within'), num(step, 'seconds', { min: 0 }), h('span', {}, 's'));
         }
         if (dev && step.type === 'press') row.append(select(S.types.button.actions.map((a) => [a, a]), step.action, (a) => (step.action = a)));
         if (dev && step.type === 'availability') row.append(select([['false', 'goes offline'], ['true', 'comes back online']], String(!!step.available), (v) => (step.available = v === 'true')));
@@ -705,6 +749,7 @@ for (const tab of document.querySelectorAll('.tabs button')) {
 $('#btn-add').addEventListener('click', () => deviceDialog());
 $('#btn-demo').addEventListener('click', createDemo);
 $('#btn-scenario').addEventListener('click', () => scenarioDialog());
+$('#btn-tests').addEventListener('click', () => run('POST', '/api/tests/run'));
 $('#mqtt-status').addEventListener('click', settingsDialog);
 $('#log-filter').addEventListener('input', renderLog);
 $('#log-pause').addEventListener('change', renderLog);

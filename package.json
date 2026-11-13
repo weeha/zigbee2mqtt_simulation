@@ -9,7 +9,8 @@
   },
   "scripts": {
     "start": "node src/server.js",
-    "broker": "node tools/broker.js"
+    "broker": "node tools/broker.js",
+    "scenarios": "node tools/run-tests.js"
   },
   "dependencies": {
     "mqtt": "^5.10.0"
