@@ -6,10 +6,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import mqtt from 'mqtt';
-import { TYPES, applyValues, bridgeDeviceEntry, buildDiscovery, lightHex } from './devices.js';
+import { TYPES, applyValues, bridgeDeviceEntry, buildDiscovery, lightHex, statePayload } from './devices.js';
 
 export const VERSION = '2.6.3-sim';
 const LOG_SIZE = 300;
+const COVER_SPEED = 10; // percent per second
+const REPORT_INTERVAL = 10; // seconds between reports of a metering plug / a simulated thermostat
 
 const randomIeee = (prefix) => '0x' + prefix + crypto.randomBytes(4).toString('hex');
 const fail = (message, status = 400) => Object.assign(new Error(message), { status });
@@ -34,6 +36,8 @@ export class Simulator extends EventEmitter {
     this.mqttError = null;
     this.permitJoin = false;
     this.nextReport = new Map();
+    this.moving = new Map(); // cover id -> target position
+    this.clearAt = new Map(); // motion sensor id -> time at which occupancy clears
     this.load();
     this.ticker = setInterval(() => this.tick(), 1000);
   }
@@ -254,7 +258,7 @@ export class Simulator extends EventEmitter {
   publishState(dev, extra = {}) {
     if (!dev.available) return; // an unreachable device does not report
     const linkquality = Math.min(255, Math.max(1, dev.linkquality + Math.round((Math.random() - 0.5) * 12)));
-    this.publish(dev.friendly_name, { ...dev.state, ...extra, linkquality });
+    this.publish(dev.friendly_name, { ...statePayload(dev), ...extra, linkquality });
   }
 
   /** Removes everything retained for one device from the broker. */
@@ -308,8 +312,10 @@ export class Simulator extends EventEmitter {
     }
     if (attribute) values = { [attribute]: values };
     else if (typeof values !== 'object' || values === null) values = { state: values };
-    if (dev.type !== 'light') return; // only the light has settable attributes
-    if (applyValues(dev, values)) {
+    const settable = TYPES[dev.type].settable;
+    if (!settable) return; // sensors and buttons do not accept commands
+    if (settable !== 'all') values = Object.fromEntries(Object.entries(values).filter(([key]) => settable.includes(key)));
+    if (this.apply(dev, values)) {
       this.publishState(dev);
       this.changed();
     }
@@ -395,7 +401,7 @@ export class Simulator extends EventEmitter {
       network_address: crypto.randomInt(1, 65000),
       linkquality: crypto.randomInt(70, 200),
       state: t.defaults(),
-      sim: type === 'sensor' ? { auto: false, interval: 30 } : {},
+      sim: t.sim ? t.sim() : {},
     };
     this.devices.push(dev);
     this.publish('bridge/event', { type: 'device_joined', data: { friendly_name: dev.friendly_name, ieee_address: ieee } });
@@ -426,13 +432,17 @@ export class Simulator extends EventEmitter {
       this.publishAvailability(dev);
       this.publishState(dev);
     }
-    if (patch.sim && dev.type === 'sensor') {
-      if (patch.sim.auto !== undefined) {
-        dev.sim.auto = !!patch.sim.auto;
+    const simFields = TYPES[dev.type].simFields;
+    if (patch.sim && simFields) {
+      for (const [key, range] of Object.entries(simFields)) {
+        const value = patch.sim[key];
+        if (value === undefined) continue;
+        if (range === 'bool') dev.sim[key] = !!value;
+        else if (Number.isFinite(Number(value))) dev.sim[key] = Math.min(range[1], Math.max(range[0], Number(value)));
+      }
+      if (dev.type === 'sensor' && patch.sim.auto !== undefined) {
         dev.sim.base = { temperature: dev.state.temperature, humidity: dev.state.humidity };
       }
-      const interval = Number(patch.sim.interval);
-      if (Number.isFinite(interval)) dev.sim.interval = Math.min(3600, Math.max(1, Math.round(interval)));
       this.nextReport.delete(id);
     }
     if (patch.state) this.setValues(id, patch.state);
@@ -440,10 +450,45 @@ export class Simulator extends EventEmitter {
     return dev;
   }
 
+  /** Applies values to a device, including the behaviour that takes time (a blind moving, motion clearing). */
+  apply(dev, values) {
+    let changed = false;
+    if (dev.type === 'cover') {
+      changed = this.coverCommand(dev, values);
+      const { state, position, ...rest } = values;
+      values = rest;
+    }
+    changed = applyValues(dev, values) || changed;
+    if (dev.type === 'motion' && 'occupancy' in values) {
+      if (dev.state.occupancy && dev.sim.timeout > 0) this.clearAt.set(dev.id, Date.now() + dev.sim.timeout * 1000);
+      else this.clearAt.delete(dev.id);
+    }
+    return changed;
+  }
+
+  /** A blind does not jump: commands only set where the motor is heading (see tick). */
+  coverCommand(dev, values) {
+    let target;
+    if (values.state !== undefined) {
+      const command = String(values.state).toUpperCase();
+      if (command === 'OPEN') target = 100;
+      else if (command === 'CLOSE') target = 0;
+      else if (command === 'STOP') return this.moving.delete(dev.id) || true;
+    }
+    const position = Number(values.position);
+    if (values.position !== undefined && values.position !== '' && values.position !== null && Number.isFinite(position)) {
+      target = Math.min(100, Math.max(0, Math.round(position)));
+    }
+    if (target === undefined) return false;
+    if (target === dev.state.position) this.moving.delete(dev.id);
+    else this.moving.set(dev.id, target);
+    return true;
+  }
+
   /** A change coming from the "physical world" (web UI or scenario), e.g. the temperature rises. */
   setValues(id, values) {
     const dev = this.getDevice(id);
-    if (!applyValues(dev, values)) return false;
+    if (!values || typeof values !== 'object' || !this.apply(dev, values)) return false;
     if (dev.type === 'sensor') dev.sim.base = { temperature: dev.state.temperature, humidity: dev.state.humidity };
     this.publishState(dev);
     this.changed();
@@ -466,6 +511,8 @@ export class Simulator extends EventEmitter {
     this.clearRetained(dev);
     this.devices = this.devices.filter((d) => d.id !== id);
     this.nextReport.delete(id);
+    this.moving.delete(id);
+    this.clearAt.delete(id);
     this.publish('bridge/event', { type: 'device_leave', data: { ieee_address: dev.ieee, friendly_name: dev.friendly_name } });
     this.publishBridgeDevices();
     this.publishBridgeInfo();
@@ -490,25 +537,63 @@ export class Simulator extends EventEmitter {
     this.emit('change');
   }
 
-  // ------------------------------------------------------------ sensors that drift on their own
+  // ------------------------------------------------------------ things that happen over time
 
   tick() {
     const now = Date.now();
     for (const dev of this.devices) {
-      if (dev.type !== 'sensor' || !dev.sim.auto || !dev.available) continue;
-      const due = this.nextReport.get(dev.id);
-      if (due === undefined) {
-        this.nextReport.set(dev.id, now + dev.sim.interval * 1000);
+      if (!dev.available) continue;
+      const s = dev.state;
+
+      if (dev.type === 'cover' && this.moving.has(dev.id)) {
+        const target = this.moving.get(dev.id);
+        s.position = s.position < target ? Math.min(target, s.position + COVER_SPEED) : Math.max(target, s.position - COVER_SPEED);
+        s.state = s.position > 0 ? 'OPEN' : 'CLOSE';
+        if (s.position === target) this.moving.delete(dev.id);
+        this.publishState(dev);
+        this.changed();
         continue;
       }
-      if (now < due) continue;
-      this.nextReport.set(dev.id, now + dev.sim.interval * 1000);
-      const base = dev.sim.base || dev.state;
-      const s = dev.state;
-      applyValues(dev, {
-        temperature: s.temperature + (base.temperature - s.temperature) * 0.2 + (Math.random() - 0.5) * 0.4,
-        humidity: s.humidity + (base.humidity - s.humidity) * 0.2 + (Math.random() - 0.5) * 1.6,
-      });
+      if (dev.type === 'motion' && now >= (this.clearAt.get(dev.id) ?? Infinity)) {
+        this.clearAt.delete(dev.id);
+        if (s.occupancy) {
+          s.occupancy = false;
+          this.publishState(dev);
+          this.changed();
+        }
+        continue;
+      }
+      if (dev.type === 'plug') s.energy += s.power / 3.6e6; // one second of consumption in kWh
+
+      // Periodic reports
+      const interval =
+        dev.type === 'sensor' && dev.sim.auto ? dev.sim.interval
+        : dev.type === 'thermostat' && dev.sim.auto ? REPORT_INTERVAL
+        : dev.type === 'plug' && s.power > 0 ? REPORT_INTERVAL
+        : 0;
+      if (!interval) {
+        this.nextReport.delete(dev.id);
+        continue;
+      }
+      const due = this.nextReport.get(dev.id);
+      if (due === undefined) this.nextReport.set(dev.id, now + interval * 1000);
+      if (due === undefined || now < due) continue;
+      this.nextReport.set(dev.id, now + interval * 1000);
+
+      if (dev.type === 'sensor') {
+        // wander around the value that was set by hand
+        const base = dev.sim.base || s;
+        applyValues(dev, {
+          temperature: s.temperature + (base.temperature - s.temperature) * 0.2 + (Math.random() - 0.5) * 0.4,
+          humidity: s.humidity + (base.humidity - s.humidity) * 0.2 + (Math.random() - 0.5) * 1.6,
+        });
+      }
+      if (dev.type === 'thermostat') {
+        // the room warms up while the valve is open and cools down towards the ambient temperature otherwise
+        const gap = dev.sim.ambient - s.local_temperature;
+        if (s.running_state !== 'heat' && Math.abs(gap) < 0.1) continue;
+        applyValues(dev, { local_temperature: s.local_temperature + (s.running_state === 'heat' ? 0.2 : Math.sign(gap) * 0.1) });
+      }
       this.publishState(dev);
       this.changed();
     }
@@ -527,7 +612,10 @@ export class Simulator extends EventEmitter {
       config: { ...config, has_password: !!password },
       mqtt: { connected: this.connected, error: this.mqttError },
       types,
-      devices: this.devices.map((d) => ({ ...d, ui: d.type === 'light' ? { hex: lightHex(d.state) } : {} })),
+      devices: this.devices.map((d) => ({
+        ...d,
+        ui: d.type === 'light' ? { hex: lightHex(d.state) } : d.type === 'cover' ? { target: this.moving.get(d.id) ?? null } : {},
+      })),
       scenarios: this.scenarios,
     };
   }

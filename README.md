@@ -17,7 +17,7 @@ click the connection pill in the top right corner to change broker URL, credenti
 
 No broker at hand? `npm run broker` starts a throw-away one on port 1883.
 
-Click **Create demo home** for 15 devices in 5 rooms plus example scenarios, or **+ Add device**
+Click **Create demo home** for 25 devices in 5 rooms plus example scenarios, or **+ Add device**
 to build your own home.
 
 ## Devices
@@ -28,6 +28,12 @@ to build your own home.
 | Color light | Philips Hue white and color ambiance (9290022166) | On/off, brightness, color temperature, color - and it follows commands from MQTT / Home Assistant |
 | Window sensor | Aqara MCCGQ11LM | Open / close, battery |
 | Button | Aqara WXKG11LM | Fire `single`, `double`, `triple`, `quadruple`, `hold`, `release` |
+| Motion sensor | Aqara RTCGQ11LM | Trigger motion (clears again after a timeout), illuminance, battery |
+| Smart plug | Tuya TS011F_plug_1 | On/off - also over MQTT - and the connected load; reports power, current, voltage and a growing energy counter |
+| Radiator thermostat | SONOFF TRVZB | Room temperature, setpoint, mode; shows heating / idle. "Simulate room" lets the room warm up while heating and cool down otherwise |
+| Roller blind | IKEA FYRTUR (E1757) | Open / stop / close and target position; the blind moves at 10 % per second |
+| Water leak sensor | Aqara SJCGQ11LM | Leak / dry, battery |
+| Smoke detector | Aqara JTYJ-GD-01LM/BW | Smoke / clear, battery |
 
 Every device also has an availability switch (simulates a device dropping off the network).
 
@@ -56,7 +62,7 @@ With the default base topic `zigbee2mqtt`:
 | `zigbee2mqtt/bridge/event` | `device_joined`, `device_interview`, `device_leave` |
 | `zigbee2mqtt/<name>` | Device state as JSON, e.g. `{"temperature":21.5,"humidity":48,"battery":100,"linkquality":120}` |
 | `zigbee2mqtt/<name>/availability` | `{"state":"online"}` / `offline` (retained) |
-| `zigbee2mqtt/<name>/set` | Commands for lights: `state`, `brightness`, `color_temp`, `color` (`x`/`y`, `hue`/`saturation`, `r`/`g`/`b`, `hex`) |
+| `zigbee2mqtt/<name>/set` | Commands. Light: `state`, `brightness`, `color_temp`, `color` (`x`/`y`, `hue`/`saturation`, `r`/`g`/`b`, `hex`). Plug: `state`. Thermostat: `occupied_heating_setpoint`, `system_mode`. Blind: `state` (`OPEN`/`CLOSE`/`STOP`), `position` |
 | `zigbee2mqtt/<name>/get` | Makes the device publish its state |
 | `zigbee2mqtt/<name>/action` | Button action as plain text (used by the HA device triggers) |
 | `zigbee2mqtt/bridge/request/...` | Supported: `health_check`, `permit_join`, `restart`, `device/rename`, `device/remove` |
@@ -88,7 +94,7 @@ The UI uses a small JSON API which is handy for automated tests as well:
 
 ```text
 GET    /api/state
-POST   /api/devices                {type: sensor|light|window|button, friendly_name, room}
+POST   /api/devices                {type: light|plug|thermostat|cover|sensor|motion|window|leak|smoke|button, friendly_name, room}
 PATCH  /api/devices/:id            {state: {temperature: 19}, available, friendly_name, room, sim: {auto, interval}}
 POST   /api/devices/:id/action     {action: "single"}
 DELETE /api/devices/:id

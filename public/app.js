@@ -28,6 +28,12 @@ const ICONS = {
   window: '<rect x="4" y="3" width="16" height="18" rx="1"/><path d="M12 3v18M4 12h16"/>',
   windowOpen: '<rect x="4" y="3" width="16" height="18" rx="1"/><path d="M4 3l7 3v12l-7 3"/>',
   button: '<circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="3.5"/>',
+  motion: '<circle cx="13" cy="4.5" r="1.8"/><path d="M13 8l-3 2v4M13 8l3 3 3 1M13 8v6l3 3v4M13 14l-3 3-2 4"/>',
+  plug: '<path d="M9 3v5M15 3v5M6 8h12v3a6 6 0 0 1-12 0zM12 17v4"/>',
+  thermostat: '<circle cx="12" cy="12" r="8.5"/><path d="M12 12l3.5-3.5M7.5 16.5h9"/>',
+  cover: '<rect x="4" y="3" width="16" height="18" rx="1"/><path d="M4 7h16M4 11h16M4 15h16"/>',
+  leak: '<path d="M12 3s6 6.5 6 11a6 6 0 0 1-12 0c0-4.5 6-11 6-11z"/>',
+  smoke: '<circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="2"/><path d="M12 5.5V7M12 17v1.5M5.5 12H7M17 12h1.5"/>',
   edit: '<path d="M4 20h4L19 9l-4-4L4 16v4z"/>',
   trash: '<path d="M5 7h14M10 7V4h4v3M7 7l1 13h8l1-13"/>',
 };
@@ -76,7 +82,14 @@ function select(options, value, onchange) {
 }
 
 const byId = (id) => S.devices.find((d) => d.id === id);
-const TYPE_ORDER = ['light', 'sensor', 'window', 'button'];
+const typeOrder = () => Object.keys(S.types); // the server lists the types in display order
+
+/** Devices that are just one on/off fact. `alarm` is the value that is worth highlighting. */
+const BINARY = {
+  window: { prop: 'contact', alarm: false, alarmText: 'Open', okText: 'Closed', alarmIcon: 'windowOpen', okIcon: 'window' },
+  leak: { prop: 'water_leak', alarm: true, alarmText: 'Leak detected', okText: 'Dry', alarmIcon: 'leak', okIcon: 'leak' },
+  smoke: { prop: 'smoke', alarm: true, alarmText: 'Smoke detected', okText: 'Clear', alarmIcon: 'smoke', okIcon: 'smoke' },
+};
 
 // ---------------------------------------------------------------- reusable controls
 
@@ -189,19 +202,103 @@ function createCard(dev) {
     });
   }
 
-  if (dev.type === 'window') {
+  if (BINARY[dev.type]) {
+    const b = BINARY[dev.type];
     const title = h('b');
     const iconSlot = h('span');
-    let contact = true;
-    const btn = h('button', { class: 'contact', title: 'Click to open / close the window', onclick: () => setState({ contact: !contact }) },
+    let value = null;
+    const btn = h('button', { class: 'contact', title: 'Click to toggle', onclick: () => setState({ [b.prop]: !value }) },
       iconSlot, h('div', {}, title, h('span', {}, 'Click to toggle')));
     body.append(btn);
     updaters.push((d) => {
-      if (contact === d.state.contact && title.textContent) return;
-      contact = d.state.contact;
-      title.textContent = contact ? 'Closed' : 'Open';
-      btn.classList.toggle('open', !contact);
-      iconSlot.replaceChildren(icon(contact ? 'window' : 'windowOpen', 34));
+      if (value === d.state[b.prop]) return;
+      value = d.state[b.prop];
+      const alarm = value === b.alarm;
+      title.textContent = alarm ? b.alarmText : b.okText;
+      btn.classList.toggle('open', alarm);
+      iconSlot.replaceChildren(icon(alarm ? b.alarmIcon : b.okIcon, 34));
+    });
+  }
+
+  if (dev.type === 'motion') {
+    const status = h('div', { class: 'big' });
+    const trigger = h('button', { title: 'Somebody walks past the sensor', onclick: () => setState({ occupancy: true }) }, 'Trigger motion');
+    const clear = h('button', { class: 'ghost', onclick: () => setState({ occupancy: false }) }, 'Clear');
+    const lux = slider('Illuminance', { min: 0, max: 1000, step: 1 }, (v) => `${v} lx`, (v) => setState({ illuminance: v }));
+    const timeout = numberBox({ min: 0, max: 3600, title: 'Seconds without motion until occupancy clears (0 = never)' }, (v) => patch({ sim: { timeout: v } }));
+    body.append(
+      status,
+      h('div', { class: 'row' }, trigger, clear),
+      lux.el,
+      h('div', { class: 'row' }, 'Clears after', timeout.el, 's'),
+    );
+    updaters.push((d) => {
+      status.textContent = d.state.occupancy ? 'Motion' : 'Clear';
+      status.style.color = d.state.occupancy ? 'var(--warn)' : '';
+      clear.disabled = !d.state.occupancy;
+      lux.set(d.state.illuminance);
+      timeout.set(d.sim.timeout);
+    });
+  }
+
+  if (dev.type === 'plug') {
+    const power = h('div', { class: 'big' });
+    const details = h('span', { class: 'hint' });
+    const sw = toggle((on) => setState({ state: on ? 'ON' : 'OFF' }), 'Switch the plug');
+    const load = slider('Connected load (drawn while on)', { min: 0, max: 3000, step: 5 }, (v) => `${v} W`, (v) => setState({ load: v }));
+    body.append(h('div', { class: 'row between' }, power, sw.el), load.el, details);
+    updaters.push((d) => {
+      power.replaceChildren(String(d.state.power), h('small', {}, 'W'));
+      sw.set(d.state.state === 'ON');
+      load.set(d.sim.load);
+      details.textContent = `${d.state.energy.toFixed(3)} kWh · ${d.state.current} A · ${d.state.voltage} V`;
+    });
+  }
+
+  if (dev.type === 'thermostat') {
+    const temp = h('div', { class: 'big' });
+    const running = h('span', { class: 'badge' });
+    const mode = select([['off', 'Off'], ['auto', 'Auto'], ['heat', 'Heat']], dev.state.system_mode, (v) => setState({ system_mode: v }));
+    const room = slider('Room temperature', { min: 5, max: 35, step: 0.1 }, (v) => `${v.toFixed(1)} °C`, (v) => setState({ local_temperature: v }));
+    const setpoint = slider('Setpoint', { min: 4, max: 35, step: 0.5 }, (v) => `${v.toFixed(1)} °C`, (v) => setState({ occupied_heating_setpoint: v }));
+    const auto = h('input', { type: 'checkbox', onchange: () => patch({ sim: { auto: auto.checked } }) });
+    const ambient = numberBox({ min: -20, max: 40, title: 'Temperature the room cools down to while not heating' }, (v) => patch({ sim: { ambient: v } }));
+    body.append(
+      h('div', { class: 'row between' }, h('div', { class: 'row' }, temp, running), mode),
+      room.el,
+      setpoint.el,
+      h('div', { class: 'row between' },
+        h('label', { class: 'check', title: 'The room warms up while heating and cools down towards the ambient temperature otherwise' }, auto, 'Simulate room'),
+        h('span', { class: 'row' }, 'ambient', ambient.el, '°C')),
+    );
+    updaters.push((d) => {
+      const heating = d.state.running_state === 'heat';
+      temp.replaceChildren(d.state.local_temperature.toFixed(1), h('small', {}, '°C'));
+      running.textContent = heating ? 'heating' : 'idle';
+      running.style.color = heating ? 'var(--accent)' : '';
+      if (document.activeElement !== mode) mode.value = d.state.system_mode;
+      room.set(d.state.local_temperature);
+      setpoint.set(d.state.occupied_heating_setpoint);
+      auto.checked = !!d.sim.auto;
+      ambient.set(d.sim.ambient);
+    });
+  }
+
+  if (dev.type === 'cover') {
+    const position = h('div', { class: 'big' });
+    const status = h('span', { class: 'hint' });
+    const command = (state) => h('button', { onclick: () => setState({ state }) }, state === 'CLOSE' ? 'Close' : state === 'OPEN' ? 'Open' : 'Stop');
+    const target = slider('Target position', { min: 0, max: 100, step: 1 }, (v) => `${v} %`, (v) => setState({ position: v }));
+    body.append(
+      h('div', { class: 'row between' }, position, status),
+      h('div', { class: 'press' }, command('OPEN'), command('STOP'), command('CLOSE')),
+      target.el,
+    );
+    updaters.push((d) => {
+      const pos = d.state.position;
+      position.replaceChildren(String(pos), h('small', {}, '% open'));
+      status.textContent = d.ui.target == null ? (pos === 0 ? 'closed' : pos === 100 ? 'open' : 'stopped') : d.ui.target > pos ? 'opening…' : 'closing…';
+      target.set(d.ui.target ?? pos);
     });
   }
 
@@ -279,7 +376,8 @@ function renderDevices() {
   }
   const sorted = [...rooms.entries()].sort(([a], [b]) => (a === '') - (b === '') || a.localeCompare(b));
   for (const [, list] of sorted) {
-    list.sort((a, b) => TYPE_ORDER.indexOf(a.type) - TYPE_ORDER.indexOf(b.type) || a.friendly_name.localeCompare(b.friendly_name));
+    const order = typeOrder();
+    list.sort((a, b) => order.indexOf(a.type) - order.indexOf(b.type) || a.friendly_name.localeCompare(b.friendly_name));
   }
   // Only touch the layout when devices were added/removed/moved, so that dragging a slider is never interrupted.
   const signature = JSON.stringify(sorted.map(([room, list]) => [room, list.map((d) => d.id)]));
@@ -343,7 +441,7 @@ function deviceDialog(dev) {
   const name = h('input', { type: 'text', required: true, value: dev?.friendly_name || '', placeholder: 'e.g. Living Room Lamp' });
   const [room, datalist] = roomInput(dev?.room);
   let type = 'light';
-  const types = !dev && h('div', { class: 'types' }, TYPE_ORDER.map((key) =>
+  const types = !dev && h('div', { class: 'types' }, typeOrder().map((key) =>
     h('label', {},
       h('input', { type: 'radio', name: 'type', checked: key === type, onchange: () => (type = key) }),
       icon(key, 22),
@@ -394,7 +492,7 @@ function settingsDialog() {
 }
 
 function createDemo() {
-  if (confirm('Create a demo home with 15 devices in 5 rooms and a few example scenarios?')) run('POST', '/api/demo');
+  if (confirm('Create a demo home (25 devices in 5 rooms) with example scenarios? Devices that already exist are kept.')) run('POST', '/api/demo');
 }
 
 // ---------------------------------------------------------------- scenarios
@@ -451,7 +549,7 @@ function renderScenarios() {
 }
 
 function defaultValue(prop, dev) {
-  if (prop.kind === 'number') return dev.state[prop.name] ?? prop.min;
+  if (prop.kind === 'number') return dev.state[prop.name] ?? dev.sim?.[prop.name] ?? prop.min;
   if (prop.kind === 'enum') return prop.values[0];
   if (prop.kind === 'bool') return false;
   return dev.ui.hex || '#ff8800';

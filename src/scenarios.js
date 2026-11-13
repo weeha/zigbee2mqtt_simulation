@@ -122,7 +122,8 @@ export class ScenarioRunner {
       case 'availability':
         return void sim.updateDevice(step.device, { available: step.available });
       case 'ramp': {
-        const from = Number(sim.getDevice(step.device).state[step.property]);
+        const dev = sim.getDevice(step.device);
+        const from = Number(dev.state[step.property] ?? dev.sim[step.property]);
         if (!Number.isFinite(from)) throw fail(`'${step.property}' cannot be ramped`);
         const tick = Math.min(1, Math.max(0.25, step.seconds / 20));
         const count = Math.max(1, Math.round(step.seconds / tick));
@@ -154,6 +155,16 @@ export class ScenarioRunner {
       ['Bathroom', 'window', 'Bathroom Window'],
       ['Hallway', 'light', 'Hallway Light'],
       ['Hallway', 'button', 'Hallway Button'],
+      ['Hallway', 'motion', 'Hallway Motion'],
+      ['Living Room', 'motion', 'Living Room Motion'],
+      ['Living Room', 'cover', 'Living Room Blind'],
+      ['Living Room', 'thermostat', 'Living Room Thermostat'],
+      ['Bedroom', 'cover', 'Bedroom Blind'],
+      ['Bedroom', 'thermostat', 'Bedroom Thermostat'],
+      ['Kitchen', 'plug', 'Coffee Machine'],
+      ['Kitchen', 'smoke', 'Kitchen Smoke Detector'],
+      ['Bathroom', 'plug', 'Washing Machine'],
+      ['Bathroom', 'leak', 'Bathroom Leak Sensor'],
     ];
     const id = {};
     for (const [room, type, friendly_name] of home) {
@@ -200,6 +211,47 @@ export class ScenarioRunner {
           { type: 'press', device: id['Bedside Button'], action: 'hold' },
           { type: 'wait', seconds: 2 },
           { type: 'press', device: id['Bedside Button'], action: 'release' },
+        ],
+      },
+      {
+        name: 'Walking through the house',
+        steps: [
+          { type: 'set', device: id['Hallway Motion'], property: 'occupancy', value: true },
+          { type: 'wait', seconds: 6 },
+          { type: 'set', device: id['Living Room Motion'], property: 'occupancy', value: true },
+          { type: 'wait', seconds: 4 },
+          { type: 'set', device: id['Hallway Motion'], property: 'occupancy', value: false },
+          { type: 'wait', seconds: 30 },
+          { type: 'set', device: id['Living Room Motion'], property: 'occupancy', value: false },
+        ],
+      },
+      {
+        name: 'Washing machine cycle',
+        steps: [
+          { type: 'set', device: id['Washing Machine'], property: 'state', value: 'ON' },
+          { type: 'set', device: id['Washing Machine'], property: 'load', value: 2000 },
+          { type: 'wait', seconds: 30 },
+          { type: 'set', device: id['Washing Machine'], property: 'load', value: 150 },
+          { type: 'wait', seconds: 30 },
+          { type: 'set', device: id['Washing Machine'], property: 'load', value: 500 },
+          { type: 'wait', seconds: 20 },
+          { type: 'set', device: id['Washing Machine'], property: 'load', value: 2 },
+        ],
+      },
+      {
+        name: 'Sunset: it gets dark and the blinds go down',
+        steps: [
+          { type: 'ramp', device: id['Living Room Motion'], property: 'illuminance', to: 5, seconds: 30 },
+          { type: 'set', device: id['Living Room Blind'], property: 'state', value: 'CLOSE' },
+          { type: 'set', device: id['Bedroom Blind'], property: 'position', value: 20 },
+        ],
+      },
+      {
+        name: 'Water leak in the bathroom',
+        steps: [
+          { type: 'set', device: id['Bathroom Leak Sensor'], property: 'water_leak', value: true },
+          { type: 'wait', seconds: 30 },
+          { type: 'set', device: id['Bathroom Leak Sensor'], property: 'water_leak', value: false },
         ],
       },
       {

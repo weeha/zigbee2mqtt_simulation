@@ -28,29 +28,15 @@ export const COLOR_TEMP_MIN = 153;
 export const COLOR_TEMP_MAX = 500;
 const COLOR_TEMP_PRESETS = { coolest: 153, cool: 250, neutral: 370, warm: 454, warmest: 500 };
 
-export const TYPES = {
-  sensor: {
-    label: 'Temperature & humidity sensor',
-    vendor: 'SONOFF',
-    model: 'SNZB-02',
-    modelId: 'TH01',
-    description: 'Temperature and humidity sensor',
-    powerSource: 'Battery',
-    zigbeeType: 'EndDevice',
-    defaults: () => ({ temperature: 21.5, humidity: 48, battery: 100 }),
-    props: [
-      { name: 'temperature', label: 'Temperature', kind: 'number', min: -20, max: 60, step: 0.1, unit: '°C' },
-      { name: 'humidity', label: 'Humidity', kind: 'number', min: 0, max: 100, step: 0.5, unit: '%' },
-      P_BATTERY,
-    ],
-    exposes: [
-      EXP_BATTERY,
-      numeric('temperature', 'Temperature', '°C', 'Measured temperature value'),
-      numeric('humidity', 'Humidity', '%', 'Measured relative humidity'),
-      EXP_LINKQUALITY,
-    ],
-  },
+const binary = (name, label, description, value_on = true) => ({
+  type: 'binary', name, label, property: name, access: 1, value_on, value_off: !value_on, description,
+});
+const EXP_STATE = { type: 'binary', name: 'state', label: 'State', property: 'state', access: 7, value_on: 'ON', value_off: 'OFF', value_toggle: 'TOGGLE' };
 
+// props:     what the web UI / scenarios can change ("sim: true" lives in device.sim instead of the state)
+// settable:  what may be changed over MQTT (<name>/set); 'all' or a list of attributes
+// simFields: simulation settings that the web UI may change
+export const TYPES = {
   light: {
     label: 'Color light',
     vendor: 'Philips',
@@ -59,6 +45,7 @@ export const TYPES = {
     description: 'Hue white and color ambiance E26/E27',
     powerSource: 'Mains (single phase)',
     zigbeeType: 'Router',
+    settable: 'all',
     defaults: () => ({
       state: 'OFF',
       brightness: 254,
@@ -76,7 +63,7 @@ export const TYPES = {
       {
         type: 'light',
         features: [
-          { type: 'binary', name: 'state', label: 'State', property: 'state', access: 7, value_on: 'ON', value_off: 'OFF', value_toggle: 'TOGGLE', description: 'On/off state of this light' },
+          { ...EXP_STATE, description: 'On/off state of this light' },
           { type: 'numeric', name: 'brightness', label: 'Brightness', property: 'brightness', access: 7, value_min: 0, value_max: 254, description: 'Brightness of this light' },
           {
             type: 'numeric', name: 'color_temp', label: 'Color temp', property: 'color_temp', access: 7, unit: 'mired',
@@ -105,6 +92,140 @@ export const TYPES = {
     ],
   },
 
+  plug: {
+    label: 'Smart plug (power metering)',
+    vendor: 'Tuya',
+    model: 'TS011F_plug_1',
+    modelId: 'TS011F',
+    description: 'Smart plug (with power monitoring)',
+    powerSource: 'Mains (single phase)',
+    zigbeeType: 'Router',
+    settable: ['state'],
+    defaults: () => ({ state: 'OFF', power: 0, current: 0, voltage: 230, energy: 0 }),
+    sim: () => ({ load: 60 }),
+    props: [
+      { name: 'state', label: 'State', kind: 'enum', values: ['ON', 'OFF'], toggle: true },
+      { name: 'load', label: 'Connected load', kind: 'number', min: 0, max: 3500, step: 1, unit: 'W', sim: true },
+    ],
+    exposes: [
+      { type: 'switch', features: [{ ...EXP_STATE, description: 'On/off state of the switch' }] },
+      numeric('power', 'Power', 'W', 'Instantaneous measured power'),
+      numeric('current', 'Current', 'A', 'Instantaneous measured electrical current'),
+      numeric('voltage', 'Voltage', 'V', 'Measured electrical potential value'),
+      numeric('energy', 'Energy', 'kWh', 'Sum of consumed energy'),
+      EXP_LINKQUALITY,
+    ],
+  },
+
+  thermostat: {
+    label: 'Radiator thermostat',
+    vendor: 'SONOFF',
+    model: 'TRVZB',
+    modelId: 'TRVZB',
+    description: 'Zigbee thermostatic radiator valve',
+    powerSource: 'Battery',
+    zigbeeType: 'EndDevice',
+    settable: ['occupied_heating_setpoint', 'system_mode'],
+    defaults: () => ({ occupied_heating_setpoint: 21, local_temperature: 20, system_mode: 'heat', running_state: 'heat', battery: 100 }),
+    sim: () => ({ auto: false, ambient: 17 }),
+    simFields: { auto: 'bool', ambient: [-20, 40] },
+    props: [
+      { name: 'occupied_heating_setpoint', label: 'Setpoint', kind: 'number', min: 4, max: 35, step: 0.5, unit: '°C' },
+      { name: 'local_temperature', label: 'Room temperature', kind: 'number', min: -20, max: 60, step: 0.1, unit: '°C' },
+      { name: 'system_mode', label: 'Mode', kind: 'enum', values: ['off', 'auto', 'heat'] },
+      P_BATTERY,
+    ],
+    exposes: [
+      {
+        type: 'climate',
+        features: [
+          { type: 'numeric', name: 'occupied_heating_setpoint', label: 'Occupied heating setpoint', property: 'occupied_heating_setpoint', access: 7, unit: '°C', value_min: 4, value_max: 35, value_step: 0.5, description: 'Temperature setpoint' },
+          { type: 'numeric', name: 'local_temperature', label: 'Local temperature', property: 'local_temperature', access: 5, unit: '°C', description: 'Current temperature measured on the device' },
+          { type: 'enum', name: 'system_mode', label: 'System mode', property: 'system_mode', access: 7, values: ['off', 'auto', 'heat'], description: 'Mode of this device' },
+          { type: 'enum', name: 'running_state', label: 'Running state', property: 'running_state', access: 5, values: ['idle', 'heat'], description: 'The current running state' },
+        ],
+      },
+      EXP_BATTERY,
+      EXP_LINKQUALITY,
+    ],
+  },
+
+  cover: {
+    label: 'Roller blind',
+    vendor: 'IKEA',
+    model: 'E1757',
+    modelId: 'FYRTUR block-out roller blind',
+    description: 'FYRTUR roller blind, block-out',
+    powerSource: 'Battery',
+    zigbeeType: 'EndDevice',
+    settable: ['state', 'position'],
+    defaults: () => ({ state: 'OPEN', position: 100, battery: 100 }),
+    props: [
+      { name: 'position', label: 'Position', kind: 'number', min: 0, max: 100, step: 1, unit: '% open' },
+      { name: 'state', label: 'Command', kind: 'enum', values: ['OPEN', 'CLOSE', 'STOP'] },
+      P_BATTERY,
+    ],
+    exposes: [
+      {
+        type: 'cover',
+        features: [
+          { type: 'enum', name: 'state', label: 'State', property: 'state', access: 3, values: ['OPEN', 'CLOSE', 'STOP'] },
+          { type: 'numeric', name: 'position', label: 'Position', property: 'position', access: 7, unit: '%', value_min: 0, value_max: 100, description: 'Position of this cover' },
+        ],
+      },
+      EXP_BATTERY,
+      EXP_LINKQUALITY,
+    ],
+  },
+
+  sensor: {
+    label: 'Temperature & humidity sensor',
+    vendor: 'SONOFF',
+    model: 'SNZB-02',
+    modelId: 'TH01',
+    description: 'Temperature and humidity sensor',
+    powerSource: 'Battery',
+    zigbeeType: 'EndDevice',
+    defaults: () => ({ temperature: 21.5, humidity: 48, battery: 100 }),
+    sim: () => ({ auto: false, interval: 30 }),
+    simFields: { auto: 'bool', interval: [1, 3600] },
+    props: [
+      { name: 'temperature', label: 'Temperature', kind: 'number', min: -40, max: 80, step: 0.1, unit: '°C' },
+      { name: 'humidity', label: 'Humidity', kind: 'number', min: 0, max: 100, step: 0.1, unit: '%' },
+      P_BATTERY,
+    ],
+    exposes: [
+      EXP_BATTERY,
+      numeric('temperature', 'Temperature', '°C', 'Measured temperature value'),
+      numeric('humidity', 'Humidity', '%', 'Measured relative humidity'),
+      EXP_LINKQUALITY,
+    ],
+  },
+
+  motion: {
+    label: 'Motion sensor',
+    vendor: 'Aqara',
+    model: 'RTCGQ11LM',
+    modelId: 'lumi.sensor_motion.aq2',
+    description: 'Motion sensor',
+    powerSource: 'Battery',
+    zigbeeType: 'EndDevice',
+    defaults: () => ({ occupancy: false, illuminance: 120, battery: 100 }),
+    sim: () => ({ timeout: 90 }),
+    simFields: { timeout: [0, 3600] },
+    props: [
+      { name: 'occupancy', label: 'Occupancy', kind: 'bool', labels: { true: 'motion detected', false: 'clear' } },
+      { name: 'illuminance', label: 'Illuminance', kind: 'number', min: 0, max: 10000, step: 1, unit: 'lx' },
+      P_BATTERY,
+    ],
+    exposes: [
+      EXP_BATTERY,
+      binary('occupancy', 'Occupancy', 'Indicates whether the device detected occupancy'),
+      numeric('illuminance', 'Illuminance', 'lx', 'Measured illuminance'),
+      EXP_LINKQUALITY,
+    ],
+  },
+
   window: {
     label: 'Window sensor',
     vendor: 'Aqara',
@@ -120,9 +241,41 @@ export const TYPES = {
     ],
     exposes: [
       EXP_BATTERY,
-      { type: 'binary', name: 'contact', label: 'Contact', property: 'contact', access: 1, value_on: false, value_off: true, description: 'Indicates if the contact is closed (= true) or open (= false)' },
+      binary('contact', 'Contact', 'Indicates if the contact is closed (= true) or open (= false)', false),
       EXP_LINKQUALITY,
     ],
+  },
+
+  leak: {
+    label: 'Water leak sensor',
+    vendor: 'Aqara',
+    model: 'SJCGQ11LM',
+    modelId: 'lumi.sensor_wleak.aq1',
+    description: 'Water leak sensor',
+    powerSource: 'Battery',
+    zigbeeType: 'EndDevice',
+    defaults: () => ({ water_leak: false, battery: 100 }),
+    props: [
+      { name: 'water_leak', label: 'Water leak', kind: 'bool', labels: { true: 'leak detected', false: 'dry' } },
+      P_BATTERY,
+    ],
+    exposes: [EXP_BATTERY, binary('water_leak', 'Water leak', 'Indicates whether the device detected a water leak'), EXP_LINKQUALITY],
+  },
+
+  smoke: {
+    label: 'Smoke detector',
+    vendor: 'Aqara',
+    model: 'JTYJ-GD-01LM/BW',
+    modelId: 'lumi.sensor_smoke',
+    description: 'Smoke detector',
+    powerSource: 'Battery',
+    zigbeeType: 'EndDevice',
+    defaults: () => ({ smoke: false, battery: 100 }),
+    props: [
+      { name: 'smoke', label: 'Smoke', kind: 'bool', labels: { true: 'smoke detected', false: 'clear' } },
+      P_BATTERY,
+    ],
+    exposes: [EXP_BATTERY, binary('smoke', 'Smoke', 'Indicates whether the device detected smoke'), EXP_LINKQUALITY],
   },
 
   button: {
@@ -217,35 +370,62 @@ function applyLight(s, v) {
   return changed;
 }
 
-function parseBool(v) {
+function parseBool(v, labels = {}) {
   if (typeof v === 'boolean') return v;
   const s = String(v).toLowerCase();
-  if (['true', 'closed', 'close', '1', 'on'].includes(s)) return true;
-  if (['false', 'open', 'opened', '0', 'off'].includes(s)) return false;
+  if (s === labels.true || ['true', '1', 'on', 'closed', 'close'].includes(s)) return true;
+  if (s === labels.false || ['false', '0', 'off', 'open', 'opened'].includes(s)) return false;
   return undefined;
 }
 
-/** Applies a set of values to a device state. Returns true if something was accepted. */
+/** Values that follow from other values (a plug's power, whether a thermostat is heating). */
+function derive(dev) {
+  const s = dev.state;
+  if (dev.type === 'plug') {
+    s.power = s.state === 'ON' ? dev.sim.load : 0;
+    s.current = round(s.power / s.voltage, 2);
+  }
+  if (dev.type === 'thermostat') {
+    if (s.system_mode === 'off') s.running_state = 'idle';
+    else if (s.local_temperature < s.occupied_heating_setpoint - 0.2) s.running_state = 'heat';
+    else if (s.local_temperature >= s.occupied_heating_setpoint) s.running_state = 'idle';
+  }
+}
+
+/** Applies a set of values to a device. Returns true if something was accepted. */
 export function applyValues(dev, values) {
   if (!values || typeof values !== 'object') return false;
-  const s = dev.state;
+  if (dev.type === 'light') return applyLight(dev.state, values);
   let changed = false;
-  if (dev.type === 'light') changed = applyLight(s, values);
-  if (dev.type === 'sensor') {
-    const t = toNum(values.temperature);
-    if (t !== undefined) { s.temperature = round(clamp(t, -40, 80), 2); changed = true; }
-    const h = toNum(values.humidity);
-    if (h !== undefined) { s.humidity = round(clamp(h, 0, 100), 2); changed = true; }
+  for (const p of TYPES[dev.type].props) {
+    if (!(p.name in values)) continue;
+    const target = p.sim ? dev.sim : dev.state;
+    const raw = values[p.name];
+    let v;
+    if (p.kind === 'number') {
+      v = toNum(raw);
+      if (v !== undefined) v = clamp(round(Math.round(v / p.step) * p.step, 2), p.min, p.max);
+    } else if (p.kind === 'bool') {
+      v = parseBool(raw, p.labels);
+    } else if (p.kind === 'enum') {
+      const text = String(raw).toLowerCase();
+      v = p.values.find((x) => x.toLowerCase() === text);
+      if (v === undefined && text === 'toggle' && p.toggle) v = target[p.name] === p.values[0] ? p.values[1] : p.values[0];
+    }
+    if (v !== undefined) {
+      target[p.name] = v;
+      changed = true;
+    }
   }
-  if (dev.type === 'window' && values.contact !== undefined) {
-    const c = parseBool(values.contact);
-    if (c !== undefined) { s.contact = c; changed = true; }
-  }
-  if ('battery' in s) {
-    const bat = toNum(values.battery);
-    if (bat !== undefined) { s.battery = clamp(Math.round(bat), 0, 100); changed = true; }
-  }
+  derive(dev);
   return changed;
+}
+
+/** The JSON a device publishes on its state topic (without linkquality). */
+export function statePayload(dev) {
+  const s = { ...dev.state };
+  if (dev.type === 'plug') s.energy = round(s.energy, 3);
+  return s;
 }
 
 /** Colour to show in the web UI for a light. */
@@ -324,6 +504,73 @@ export function buildDiscovery(dev, ctx) {
       ...extra,
     });
 
+  const binarySensor = (objectId, deviceClass, onValue = true) =>
+    add('binary_sensor', objectId, {
+      name: null,
+      state_topic: stateTopic,
+      value_template: `{{ value_json.${objectId} }}`,
+      payload_on: onValue,
+      payload_off: !onValue,
+      device_class: deviceClass,
+    });
+
+  if (dev.type === 'plug') {
+    add('switch', 'switch', {
+      name: null,
+      state_topic: stateTopic,
+      command_topic: `${stateTopic}/set`,
+      value_template: '{{ value_json.state }}',
+      payload_on: 'ON',
+      payload_off: 'OFF',
+    });
+    sensor('power', 'Power', { device_class: 'power', unit_of_measurement: 'W' });
+    sensor('energy', 'Energy', { device_class: 'energy', unit_of_measurement: 'kWh', state_class: 'total_increasing' });
+    sensor('current', 'Current', { device_class: 'current', unit_of_measurement: 'A' });
+    sensor('voltage', 'Voltage', { device_class: 'voltage', unit_of_measurement: 'V' });
+  }
+  if (dev.type === 'thermostat') {
+    add('climate', 'climate', {
+      name: null,
+      temperature_unit: 'C',
+      temp_step: 0.5,
+      min_temp: 4,
+      max_temp: 35,
+      current_temperature_topic: stateTopic,
+      current_temperature_template: '{{ value_json.local_temperature }}',
+      temperature_state_topic: stateTopic,
+      temperature_state_template: '{{ value_json.occupied_heating_setpoint }}',
+      temperature_command_topic: `${stateTopic}/set/occupied_heating_setpoint`,
+      modes: ['off', 'auto', 'heat'],
+      mode_state_topic: stateTopic,
+      mode_state_template: '{{ value_json.system_mode }}',
+      mode_command_topic: `${stateTopic}/set/system_mode`,
+      action_topic: stateTopic,
+      action_template: "{% set values = {None:None,'idle':'idle','heat':'heating','cool':'cooling','fan_only':'fan'} %}{{ values[value_json.running_state] }}",
+    });
+  }
+  if (dev.type === 'cover') {
+    add('cover', 'cover', {
+      name: null,
+      device_class: 'blind',
+      state_topic: stateTopic,
+      command_topic: `${stateTopic}/set`,
+      value_template: '{{ value_json.state }}',
+      state_open: 'OPEN',
+      state_closed: 'CLOSE',
+      state_stopped: 'STOP',
+      position_topic: stateTopic,
+      position_template: '{{ value_json.position }}',
+      set_position_topic: `${stateTopic}/set`,
+      set_position_template: '{ "position": {{ position }} }',
+    });
+  }
+  if (dev.type === 'motion') {
+    binarySensor('occupancy', 'occupancy');
+    sensor('illuminance', 'Illuminance', { device_class: 'illuminance', unit_of_measurement: 'lx' });
+  }
+  if (dev.type === 'leak') binarySensor('water_leak', 'moisture');
+  if (dev.type === 'smoke') binarySensor('smoke', 'smoke');
+  if (dev.type === 'window') binarySensor('contact', 'window', false);
   if (dev.type === 'sensor') {
     sensor('temperature', 'Temperature', { device_class: 'temperature', unit_of_measurement: '°C' });
     sensor('humidity', 'Humidity', { device_class: 'humidity', unit_of_measurement: '%' });
@@ -339,16 +586,6 @@ export function buildDiscovery(dev, ctx) {
       supported_color_modes: ['xy', 'color_temp'],
       min_mireds: COLOR_TEMP_MIN,
       max_mireds: COLOR_TEMP_MAX,
-    });
-  }
-  if (dev.type === 'window') {
-    add('binary_sensor', 'contact', {
-      name: null,
-      state_topic: stateTopic,
-      value_template: '{{ value_json.contact }}',
-      payload_on: false,
-      payload_off: true,
-      device_class: 'window',
     });
   }
   if (dev.type === 'button') {
