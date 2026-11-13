@@ -301,6 +301,10 @@ export class ScenarioRunner {
       id[friendly_name] = (existing || sim.addDevice({ type, friendly_name, room })).id;
       if (!existing && follow) sim.updateDevice(id[friendly_name], { sim: follow });
     }
+    // The rooms of the house link their devices; a room that was set up before keeps its setting.
+    for (const room of new Set(home.map(([name]) => name))) {
+      if (room !== 'Outside' && !sim.rooms[room]) sim.setRoom({ name: room, physics: true });
+    }
     const scenarios = [
       {
         name: 'Airing the bedroom',
@@ -371,7 +375,8 @@ export class ScenarioRunner {
       {
         name: 'Sunset: it gets dark and the blinds go down',
         steps: [
-          { type: 'ramp', device: id['Living Room Motion'], property: 'illuminance', to: 5, seconds: 30 },
+          { type: 'clock', time: '19:30', speed: 600 },
+          { type: 'until', time: '20:45' },
           { type: 'set', device: id['Living Room Blind'], property: 'state', value: 'CLOSE' },
           { type: 'set', device: id['Bedroom Blind'], property: 'position', value: 20 },
         ],

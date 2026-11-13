@@ -40,6 +40,7 @@ const route = (method, pattern, handler) =>
 route('GET', '/api/state', () => snapshot());
 route('PUT', '/api/config', async (p, body) => { await sim.setConfig(body); });
 route('PUT', '/api/clock', (p, body) => sim.setClock(body));
+route('PUT', '/api/rooms', (p, body) => sim.setRoom(body));
 route('POST', '/api/demo', () => scenarios.createDemo());
 route('POST', '/api/devices', (p, body) => sim.addDevice(body));
 route('PATCH', '/api/devices/:id', (p, body) => sim.updateDevice(p.id, body));

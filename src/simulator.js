@@ -14,6 +14,13 @@ const LOG_SIZE = 300;
 const COVER_SPEED = 10; // percent per second
 const CLOCK_STEP = 250; // milliseconds between two steps of the simulated clock
 const DEFAULT_PEAK = 400; // lx a sun-following motion sensor sees at noon
+// Room physics, per second. Fast enough to watch, not meant to be realistic.
+const HEAT_RATE = 0.05; // °C a heating radiator adds
+const AIRING_RATE = 0.02; // share of the gap to outdoors that one open window closes
+const LEAK_RATE = 0.0003; // the same for a closed room (walls)
+const SETTLE_RATE = 0.002; // humidity settling at REST_HUMIDITY while the windows are closed
+const REST_HUMIDITY = 50;
+const LAMP_LUX = 150; // what one lamp at full brightness adds to the room
 const REPORT_INTERVAL = 10; // seconds between reports of a metering plug / a simulated thermostat
 
 const randomIeee = (prefix) => '0x' + prefix + crypto.randomBytes(4).toString('hex');
@@ -34,6 +41,7 @@ export class Simulator extends EventEmitter {
     this.devices = [];
     this.scenarios = [];
     this.clock = clockDefaults();
+    this.rooms = {}; // room name -> { physics, temperature, humidity }
     this.log = [];
     this.client = null;
     this.connected = false;
@@ -57,6 +65,7 @@ export class Simulator extends EventEmitter {
       this.devices = (data.devices || []).filter((d) => TYPES[d.type]);
       this.scenarios = data.scenarios || [];
       Object.assign(this.clock, data.clock);
+      this.rooms = data.rooms || {};
     } catch (err) {
       if (err.code !== 'ENOENT') console.error(`Could not read ${this.file}: ${err.message}`);
     }
@@ -70,7 +79,7 @@ export class Simulator extends EventEmitter {
   saveNow() {
     clearTimeout(this.saveTimer);
     fs.mkdirSync(path.dirname(this.file), { recursive: true });
-    const data = { config: this.config, devices: this.devices, scenarios: this.scenarios, clock: this.clock };
+    const data = { config: this.config, devices: this.devices, scenarios: this.scenarios, clock: this.clock, rooms: this.rooms };
     fs.writeFileSync(this.file, JSON.stringify(data, null, 2));
   }
 
@@ -524,6 +533,13 @@ export class Simulator extends EventEmitter {
     const dev = this.getDevice(id);
     if (!values || typeof values !== 'object' || !this.apply(dev, values)) return false;
     if (dev.type === 'sensor') dev.sim.base = { temperature: dev.state.temperature, humidity: dev.state.humidity };
+    const room = this.physicsRoom(dev);
+    if (room) {
+      // Setting what a device measures means: the room itself is now that warm / humid.
+      if (dev.type === 'sensor' && 'temperature' in values) room.temperature = dev.state.temperature;
+      if (dev.type === 'sensor' && 'humidity' in values) room.humidity = dev.state.humidity;
+      if (dev.type === 'thermostat' && 'local_temperature' in values) room.temperature = dev.state.local_temperature;
+    }
     this.publishState(dev);
     this.changed();
     return true;
@@ -631,6 +647,7 @@ export class Simulator extends EventEmitter {
     const env = environment(this.clock);
     for (const dev of this.devices) {
       let values;
+      if (this.physicsRoom(dev)) continue; // the room decides (see roomPhysics)
       if (dev.type === 'motion' && dev.sim.sun) {
         const illuminance = Math.round((env.daylight / 100) * (dev.sim.peak ?? DEFAULT_PEAK));
         if (illuminance !== dev.state.illuminance) values = { illuminance };
@@ -648,15 +665,99 @@ export class Simulator extends EventEmitter {
     }
   }
 
+  // ------------------------------------------------------------ room physics
+
+  /** The room of a device, if that room simulates its climate and light. An outdoor sensor is not in the room. */
+  physicsRoom(dev) {
+    const room = dev.room ? this.rooms[dev.room] : null;
+    return room?.physics && !(dev.type === 'sensor' && dev.sim.outdoor) ? room : null;
+  }
+
+  setRoom({ name, physics, temperature, humidity }) {
+    name = String(name ?? '');
+    const devices = this.devices.filter((d) => d.room === name);
+    if (!name || !devices.length) throw fail('Room not found', 404);
+    const room = (this.rooms[name] ??= { physics: false });
+    if (physics !== undefined) room.physics = !!physics;
+    if (room.physics && room.temperature === undefined) {
+      // start from what the devices in the room show right now
+      const average = (list) => (list.length ? list.reduce((a, b) => a + b, 0) / list.length : undefined);
+      const sensors = devices.filter((d) => d.type === 'sensor' && !d.sim.outdoor);
+      room.temperature = average(sensors.map((d) => d.state.temperature))
+        ?? average(devices.filter((d) => d.type === 'thermostat').map((d) => d.state.local_temperature)) ?? 21;
+      room.humidity = average(sensors.map((d) => d.state.humidity)) ?? REST_HUMIDITY;
+    }
+    for (const [key, value, min, max] of [['temperature', temperature, -40, 80], ['humidity', humidity, 0, 100]]) {
+      if (value === undefined) continue;
+      if (!(Number(value) >= min && Number(value) <= max)) throw fail(`${key} must be between ${min} and ${max}`);
+      room[key] = Number(value);
+    }
+    this.roomPhysics(0);
+    this.changed();
+    return room;
+  }
+
+  /**
+   * Links the devices of a room: open windows let the outdoor air in, heating radiators warm
+   * the room, blinds and lamps decide how bright it is. Sensors and thermostats report the result.
+   */
+  roomPhysics(seconds = 1) {
+    const env = environment(this.clock);
+    const tenth = (v) => Math.round(v * 10) / 10;
+    for (const [name, room] of Object.entries(this.rooms)) {
+      if (!room.physics) continue;
+      const devices = this.devices.filter((d) => d.room === name && this.physicsRoom(d));
+      if (!devices.length) continue;
+      const of = (type) => devices.filter((d) => d.type === type);
+
+      const open = of('window').filter((d) => d.state.contact === false).length;
+      const heating = of('thermostat').filter((d) => d.state.running_state === 'heat').length;
+      // A room without a radiator keeps its temperature while closed: nothing could warm it up again.
+      const leak = of('thermostat').length ? LEAK_RATE : 0;
+      const exchange = Math.min(1, (leak + open * AIRING_RATE) * seconds);
+      room.temperature += heating * HEAT_RATE * seconds + (env.outdoor_temperature - room.temperature) * exchange;
+      room.humidity += open
+        ? (env.outdoor_humidity - room.humidity) * Math.min(1, open * AIRING_RATE * seconds)
+        : (REST_HUMIDITY - room.humidity) * SETTLE_RATE * seconds;
+
+      const blinds = of('cover');
+      const openness = blinds.length ? blinds.reduce((sum, d) => sum + d.state.position, 0) / blinds.length / 100 : 1;
+      const lamps = of('light').filter((d) => d.state.state === 'ON').reduce((sum, d) => sum + (d.state.brightness / 254) * LAMP_LUX, 0);
+
+      const temperature = tenth(room.temperature);
+      const humidity = tenth(room.humidity);
+      for (const dev of devices) {
+        const s = dev.state;
+        let values;
+        if (dev.type === 'sensor') {
+          // with "auto drift" the periodic report wanders around this instead
+          dev.sim.base = { temperature, humidity };
+          if (!dev.sim.auto && (s.temperature !== temperature || s.humidity !== humidity)) values = dev.sim.base;
+        }
+        if (dev.type === 'thermostat' && s.local_temperature !== temperature) values = { local_temperature: temperature };
+        if (dev.type === 'motion') {
+          const illuminance = Math.round((env.daylight / 100) * (dev.sim.peak ?? DEFAULT_PEAK) * openness + lamps);
+          if (illuminance !== s.illuminance) values = { illuminance };
+        }
+        if (!values || !dev.available) continue;
+        applyValues(dev, values);
+        this.publishState(dev);
+        this.changed();
+      }
+    }
+  }
+
   // ------------------------------------------------------------ things that happen over time
 
   tick() {
     const now = Date.now();
     if (this.clockPublished !== formatTime(this.clock.minutes)) this.publishClock();
     this.followClock();
+    this.roomPhysics();
     for (const dev of this.devices) {
       if (!dev.available) continue;
       const s = dev.state;
+      const physics = !!this.physicsRoom(dev);
 
       if (dev.type === 'cover' && this.moving.has(dev.id)) {
         const target = this.moving.get(dev.id);
@@ -681,7 +782,7 @@ export class Simulator extends EventEmitter {
       // Periodic reports
       const interval =
         dev.type === 'sensor' && dev.sim.auto ? dev.sim.interval
-        : dev.type === 'thermostat' && dev.sim.auto ? REPORT_INTERVAL
+        : dev.type === 'thermostat' && dev.sim.auto && !physics ? REPORT_INTERVAL
         : dev.type === 'plug' && s.power > 0 ? REPORT_INTERVAL
         : 0;
       if (!interval) {
@@ -696,7 +797,7 @@ export class Simulator extends EventEmitter {
       if (dev.type === 'sensor') {
         // wander around the value that was set by hand
         const base = dev.sim.base || s;
-        const pull = dev.sim.outdoor ? 1 : 0.2; // an outdoor sensor keeps up with the weather
+        const pull = dev.sim.outdoor || physics ? 1 : 0.2; // keeps up with the weather / the room
         applyValues(dev, {
           temperature: s.temperature + (base.temperature - s.temperature) * pull + (Math.random() - 0.5) * 0.4,
           humidity: s.humidity + (base.humidity - s.humidity) * pull + (Math.random() - 0.5) * 1.6,
@@ -732,6 +833,12 @@ export class Simulator extends EventEmitter {
       })),
       scenarios: this.scenarios,
       clock: { ...this.clockView(), speeds: SPEEDS },
+      rooms: Object.fromEntries([...new Set(this.devices.map((d) => d.room).filter(Boolean))].map((name) => {
+        const room = this.rooms[name];
+        return [name, room?.physics
+          ? { physics: true, temperature: Math.round(room.temperature * 10) / 10, humidity: Math.round(room.humidity) }
+          : { physics: false }];
+      })),
     };
   }
 

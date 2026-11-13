@@ -59,6 +59,33 @@ automations you want to test instead of `sun.sun` or a time trigger.
 Only the environment follows the clock. Devices keep working in real seconds (a blind still
 takes 10 s, motion still clears after its timeout), and so do delays inside Home Assistant.
 
+## Room physics
+
+Tick **Room physics** in a room's heading and the devices of that room start to affect each
+other. The room then has a temperature and a humidity of its own, shown in the heading:
+
+| What happens | Effect on the room |
+| --- | --- |
+| A window is open | Temperature and humidity move towards the outdoor values of the simulated weather - about a third of the way in 20 s |
+| A thermostat is heating | The room warms up by 0.05 °C per second |
+| Everything is closed | A room with a thermostat slowly loses heat to the outside, humidity settles at 50 % |
+| A blind closes | Less daylight: the illuminance scales with how far the blinds are open |
+| A lamp is on | Up to 150 lx more, depending on its brightness |
+
+Temperature sensors and thermostats in the room report the room temperature, motion sensors
+the resulting illuminance. So opening a window really makes the thermostat start heating,
+and switching a lamp on is visible to a motion sensor - without scripting it in a scenario.
+
+- Setting a sensor's temperature or humidity by hand (or in a scenario) sets the room; the
+  physics carries on from there.
+- A sensor marked as outdoor sensor is not part of its room.
+- A thermostat's own "Simulate room" option is not used in such a room.
+- A room without a thermostat keeps its temperature while its windows are closed.
+- The rates are chosen so that you can watch things happen, not to be realistic, and they
+  run in real seconds whatever the speed of the simulated clock.
+
+"Create demo home" switches room physics on for its indoor rooms.
+
 ## Scenarios
 
 The **Scenarios** tab holds scripted sequences. A step can
@@ -152,6 +179,7 @@ The UI uses a small JSON API which is handy for automated tests as well:
 GET    /api/state
 POST   /api/devices                {type: light|plug|thermostat|cover|sensor|motion|window|leak|smoke|button, friendly_name, room}
 PATCH  /api/devices/:id            {state: {temperature: 19}, available, friendly_name, room, sim: {auto, interval, outdoor, sun, peak}}
+PUT    /api/rooms                  {name, physics: true|false, temperature, humidity}
 PUT    /api/clock                  {time: "07:30"|"now", speed: 1|60|300|600|1800|3600, running, sunrise, sunset, temp_min, temp_max}
 POST   /api/devices/:id/action     {action: "single"}
 DELETE /api/devices/:id

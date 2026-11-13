@@ -82,6 +82,8 @@ function select(options, value, onchange) {
 }
 
 const byId = (id) => S.devices.find((d) => d.id === id);
+/** Does the room of this device simulate its climate and light? (An outdoor sensor is not in the room.) */
+const inPhysicsRoom = (d) => !!S.rooms[d.room]?.physics && !(d.type === 'sensor' && d.sim.outdoor);
 const typeOrder = () => Object.keys(S.types); // the server lists the types in display order
 
 /** Devices that are just one on/off fact. `alarm` is the value that is worth highlighting. */
@@ -248,9 +250,14 @@ function createCard(dev) {
       clear.disabled = !d.state.occupancy;
       lux.set(d.state.illuminance);
       timeout.set(d.sim.timeout);
-      sun.checked = !!d.sim.sun;
+      const physics = inPhysicsRoom(d);
+      sun.checked = !!d.sim.sun || physics;
+      sun.disabled = physics;
+      sun.parentNode.title = physics
+        ? 'Room physics: the illuminance comes from the daylight, the blinds and the lamps of this room'
+        : 'The illuminance follows the simulated daylight (see the clock bar)';
       peak.set(d.sim.peak ?? 400);
-      lux.el.classList.toggle('follows', !!d.sim.sun);
+      lux.el.classList.toggle('follows', !!d.sim.sun || physics);
     });
   }
 
@@ -276,16 +283,19 @@ function createCard(dev) {
     const setpoint = slider('Setpoint', { min: 4, max: 35, step: 0.5 }, (v) => `${v.toFixed(1)} °C`, (v) => setState({ occupied_heating_setpoint: v }));
     const auto = h('input', { type: 'checkbox', onchange: () => patch({ sim: { auto: auto.checked } }) });
     const ambient = numberBox({ min: -20, max: 40, title: 'Temperature the room cools down to while not heating' }, (v) => patch({ sim: { ambient: v } }));
+    const simRow = h('div', { class: 'row between' },
+      h('label', { class: 'check', title: 'The room warms up while heating and cools down towards the ambient temperature otherwise' }, auto, 'Simulate room'),
+      h('span', { class: 'row' }, 'ambient', ambient.el, '°C'));
     body.append(
       h('div', { class: 'row between' }, h('div', { class: 'row' }, temp, running), mode),
       room.el,
       setpoint.el,
-      h('div', { class: 'row between' },
-        h('label', { class: 'check', title: 'The room warms up while heating and cools down towards the ambient temperature otherwise' }, auto, 'Simulate room'),
-        h('span', { class: 'row' }, 'ambient', ambient.el, '°C')),
+      simRow,
     );
     updaters.push((d) => {
       const heating = d.state.running_state === 'heat';
+      simRow.classList.toggle('follows', inPhysicsRoom(d)); // room physics takes over
+      simRow.title = inPhysicsRoom(d) ? 'Not used: room physics simulates this room' : '';
       temp.replaceChildren(d.state.local_temperature.toFixed(1), h('small', {}, '°C'));
       running.textContent = heating ? 'heating' : 'idle';
       running.style.color = heating ? 'var(--accent)' : '';
@@ -369,6 +379,7 @@ function createCard(dev) {
 const cards = new Map();
 let layoutSignature = '';
 
+const roomHeads = new Map(); // room name -> the controls in its heading
 function renderDevices() {
   const root = $('#tab-devices');
   if (!S.devices.length) {
@@ -405,8 +416,25 @@ function renderDevices() {
         if (!cards.has(d.id)) cards.set(d.id, createCard(d));
         grid.append(cards.get(d.id));
       }
-      root.append(h('h2', {}, room || 'No room', h('small', {}, `${list.length} device${list.length === 1 ? '' : 's'}`)), grid);
+      const head = h('h2', {}, h('span', {}, room || 'No room', h('small', {}, `${list.length} device${list.length === 1 ? '' : 's'}`)));
+      if (room) {
+        const physics = h('input', { type: 'checkbox', onchange: () => run('PUT', '/api/rooms', { name: room, physics: physics.checked }) });
+        const climate = h('span', { class: 'room-climate' });
+        head.append(climate, h('label', {
+          class: 'check',
+          title: 'Links the devices of this room: open windows let the outdoor air in, heating thermostats warm the room, '
+            + 'blinds and lamps change the illuminance. Sensors and thermostats report the room temperature.',
+        }, physics, 'Room physics'));
+        roomHeads.set(room, { physics, climate });
+      }
+      root.append(head, grid);
     }
+  }
+  for (const [room, head] of roomHeads) {
+    const r = S.rooms[room];
+    if (!r) { roomHeads.delete(room); continue; }
+    head.physics.checked = r.physics;
+    head.climate.textContent = r.physics ? `${r.temperature.toFixed(1)} °C · ${r.humidity} %` : '';
   }
   for (const d of S.devices) cards.get(d.id)._update(d);
 }
