@@ -6,6 +6,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Simulator } from './simulator.js';
 import { ScenarioRunner } from './scenarios.js';
+import { exportHome, importHome } from './portable.js';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PUBLIC = path.join(ROOT, 'public');
@@ -45,6 +46,9 @@ route('POST', '/api/demo', () => scenarios.createDemo());
 route('POST', '/api/devices', (p, body) => sim.addDevice(body));
 route('PATCH', '/api/devices/:id', (p, body) => sim.updateDevice(p.id, body));
 route('DELETE', '/api/devices/:id', (p) => sim.removeDevice(p.id));
+route('POST', '/api/devices/:id/firmware', (p, body) => sim.firmware(p.id, body.action));
+route('GET', '/api/export', () => exportHome(sim));
+route('POST', '/api/import', (p, body) => importHome(sim, scenarios, body.home, body.mode));
 route('POST', '/api/devices/:id/action', (p, body) => sim.pressButton(p.id, body.action));
 route('POST', '/api/scenarios', (p, body) => scenarios.save(null, body));
 route('PUT', '/api/scenarios/:id', (p, body) => scenarios.save(p.id, body));

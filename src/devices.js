@@ -31,12 +31,28 @@ const COLOR_TEMP_PRESETS = { coolest: 153, cool: 250, neutral: 370, warm: 454, w
 const binary = (name, label, description, value_on = true) => ({
   type: 'binary', name, label, property: name, access: 1, value_on, value_off: !value_on, description,
 });
+const actionExposes = (actions) => [
+  EXP_BATTERY,
+  { type: 'enum', name: 'action', label: 'Action', property: 'action', access: 1, values: actions, description: 'Triggered action (e.g. a button click)', category: 'diagnostic' },
+  EXP_LINKQUALITY,
+];
+const P_SETPOINT = { name: 'occupied_heating_setpoint', label: 'Setpoint', kind: 'number', min: 4, max: 35, step: 0.5, unit: '°C' };
+const P_ROOM_TEMPERATURE = { name: 'local_temperature', label: 'Room temperature', kind: 'number', min: -20, max: 60, step: 0.1, unit: '°C' };
+const P_MODE = { name: 'system_mode', label: 'Mode', kind: 'enum', values: ['off', 'auto', 'heat'] };
+const O_RUNNING = { name: 'running_state', label: 'Running state', kind: 'enum', values: ['idle', 'heat'] };
+const CLIMATE_FEATURES = [
+  { type: 'numeric', name: 'occupied_heating_setpoint', label: 'Occupied heating setpoint', property: 'occupied_heating_setpoint', access: 7, unit: '°C', value_min: 4, value_max: 35, value_step: 0.5, description: 'Temperature setpoint' },
+  { type: 'numeric', name: 'local_temperature', label: 'Local temperature', property: 'local_temperature', access: 5, unit: '°C', description: 'Current temperature measured on the device' },
+  { type: 'enum', name: 'system_mode', label: 'System mode', property: 'system_mode', access: 7, values: ['off', 'auto', 'heat'], description: 'Mode of this device' },
+  { type: 'enum', name: 'running_state', label: 'Running state', property: 'running_state', access: 5, values: ['idle', 'heat'], description: 'The current running state' },
+];
 const EXP_STATE = { type: 'binary', name: 'state', label: 'State', property: 'state', access: 7, value_on: 'ON', value_off: 'OFF', value_toggle: 'TOGGLE' };
 
 // props:     what the web UI / scenarios can change ("sim: true" lives in device.sim instead of the state)
 // settable:  what may be changed over MQTT (<name>/set); 'all' or a list of attributes
 // simFields: simulation settings that the web UI may change
 // observe:   read-only values a scenario can check in addition to the props
+// actions:   what a remote can send on <name>/action
 export const TYPES = {
   light: {
     label: 'Color light',
@@ -135,12 +151,12 @@ export const TYPES = {
     sim: () => ({ auto: false, ambient: 17 }),
     simFields: { auto: 'bool', ambient: [-20, 40] },
     props: [
-      { name: 'occupied_heating_setpoint', label: 'Setpoint', kind: 'number', min: 4, max: 35, step: 0.5, unit: '°C' },
-      { name: 'local_temperature', label: 'Room temperature', kind: 'number', min: -20, max: 60, step: 0.1, unit: '°C' },
-      { name: 'system_mode', label: 'Mode', kind: 'enum', values: ['off', 'auto', 'heat'] },
+      P_SETPOINT,
+      P_ROOM_TEMPERATURE,
+      P_MODE,
       P_BATTERY,
     ],
-    observe: [{ name: 'running_state', label: 'Running state', kind: 'enum', values: ['idle', 'heat'] }],
+    observe: [O_RUNNING],
     exposes: [
       {
         type: 'climate',
@@ -151,6 +167,38 @@ export const TYPES = {
           { type: 'enum', name: 'running_state', label: 'Running state', property: 'running_state', access: 5, values: ['idle', 'heat'], description: 'The current running state' },
         ],
       },
+      EXP_BATTERY,
+      EXP_LINKQUALITY,
+    ],
+  },
+
+  trv: {
+    label: 'Radiator thermostat with valve position',
+    vendor: 'Bosch',
+    model: 'BTH-RA',
+    modelId: 'RBSH-TRV0-ZB-EU',
+    description: 'Radiator thermostat II',
+    powerSource: 'Battery',
+    zigbeeType: 'EndDevice',
+    settable: ['occupied_heating_setpoint', 'system_mode', 'window_detection'],
+    defaults: () => ({
+      occupied_heating_setpoint: 21, local_temperature: 20, system_mode: 'heat', running_state: 'heat',
+      pi_heating_demand: 40, window_detection: 'OFF', battery: 100,
+    }),
+    sim: () => ({ detect: true }), // detect: notices a sudden temperature drop and pauses heating by itself
+    simFields: { detect: 'bool' },
+    props: [
+      P_SETPOINT,
+      P_ROOM_TEMPERATURE,
+      P_MODE,
+      { name: 'window_detection', label: 'Window open mode', kind: 'enum', values: ['ON', 'OFF'], toggle: true },
+      P_BATTERY,
+    ],
+    observe: [O_RUNNING, { name: 'pi_heating_demand', label: 'Valve position', kind: 'number', min: 0, max: 100, unit: '%' }],
+    exposes: [
+      { type: 'climate', features: CLIMATE_FEATURES },
+      numeric('pi_heating_demand', 'PI heating demand', '%', 'Position of the valve (= demanded heat) where 0% is fully closed and 100% is fully open', { value_min: 0, value_max: 100 }),
+      { type: 'binary', name: 'window_detection', label: 'Window detection', property: 'window_detection', access: 7, value_on: 'ON', value_off: 'OFF', description: 'Window open mode: heating is paused while it is on' },
       EXP_BATTERY,
       EXP_LINKQUALITY,
     ],
@@ -208,6 +256,30 @@ export const TYPES = {
     ],
   },
 
+  air: {
+    label: 'Air quality sensor',
+    vendor: 'Tuya',
+    model: 'TS0601_air_quality_sensor',
+    modelId: 'TS0601',
+    description: 'Air quality sensor',
+    powerSource: 'DC Source',
+    zigbeeType: 'EndDevice',
+    defaults: () => ({ co2: 600, voc: 120, temperature: 21.5, humidity: 48 }),
+    props: [
+      { name: 'co2', label: 'CO₂', kind: 'number', min: 350, max: 5000, step: 1, unit: 'ppm' },
+      { name: 'voc', label: 'VOC', kind: 'number', min: 0, max: 5000, step: 1, unit: 'ppb' },
+      { name: 'temperature', label: 'Temperature', kind: 'number', min: -40, max: 80, step: 0.1, unit: '°C' },
+      { name: 'humidity', label: 'Humidity', kind: 'number', min: 0, max: 100, step: 0.1, unit: '%' },
+    ],
+    exposes: [
+      numeric('temperature', 'Temperature', '°C', 'Measured temperature value'),
+      numeric('humidity', 'Humidity', '%', 'Measured relative humidity'),
+      numeric('co2', 'CO2', 'ppm', 'The measured CO2 (carbon dioxide) value'),
+      numeric('voc', 'VOC', 'ppb', 'Measured VOC value'),
+      EXP_LINKQUALITY,
+    ],
+  },
+
   motion: {
     label: 'Motion sensor',
     vendor: 'Aqara',
@@ -228,6 +300,24 @@ export const TYPES = {
       EXP_BATTERY,
       binary('occupancy', 'Occupancy', 'Indicates whether the device detected occupancy'),
       numeric('illuminance', 'Illuminance', 'lx', 'Measured illuminance'),
+      EXP_LINKQUALITY,
+    ],
+  },
+
+  presence: {
+    label: 'Presence sensor (mmWave)',
+    vendor: 'Aqara',
+    model: 'RTCZCGQ11LM',
+    modelId: 'lumi.motion.ac01',
+    description: 'Presence sensor FP1',
+    powerSource: 'DC Source',
+    zigbeeType: 'EndDevice',
+    defaults: () => ({ presence: false, presence_event: 'leave' }),
+    props: [{ name: 'presence', label: 'Presence', kind: 'bool', labels: { true: 'somebody is here', false: 'nobody' } }],
+    observe: [{ name: 'presence_event', label: 'Presence event', kind: 'enum', values: ['enter', 'leave'] }],
+    exposes: [
+      binary('presence', 'Presence', 'Indicates whether the device detected presence'),
+      { type: 'enum', name: 'presence_event', label: 'Presence event', property: 'presence_event', access: 1, values: ['enter', 'leave', 'left_enter', 'right_leave', 'right_enter', 'left_leave', 'approach', 'away'], description: 'Presence events' },
       EXP_LINKQUALITY,
     ],
   },
@@ -284,6 +374,58 @@ export const TYPES = {
     exposes: [EXP_BATTERY, binary('smoke', 'Smoke', 'Indicates whether the device detected smoke'), EXP_LINKQUALITY],
   },
 
+  lock: {
+    label: 'Door lock',
+    vendor: 'Yale',
+    model: 'YRD226HA2619',
+    modelId: 'YRD226 TSDB',
+    description: 'Assure lock',
+    powerSource: 'Battery',
+    zigbeeType: 'EndDevice',
+    settable: ['state'],
+    defaults: () => ({ state: 'LOCK', lock_state: 'locked', battery: 100 }),
+    props: [{ name: 'state', label: 'Lock', kind: 'enum', values: ['LOCK', 'UNLOCK'], toggle: true }, P_BATTERY],
+    observe: [{ name: 'lock_state', label: 'Lock state', kind: 'enum', values: ['locked', 'unlocked'] }],
+    exposes: [
+      {
+        type: 'lock',
+        features: [
+          { type: 'binary', name: 'state', label: 'State', property: 'state', access: 7, value_on: 'LOCK', value_off: 'UNLOCK', description: 'State of the lock' },
+          { type: 'enum', name: 'lock_state', label: 'Lock state', property: 'lock_state', access: 1, values: ['not_fully_locked', 'locked', 'unlocked'], description: 'Actual state of the lock' },
+        ],
+      },
+      EXP_BATTERY,
+      EXP_LINKQUALITY,
+    ],
+  },
+
+  siren: {
+    label: 'Siren',
+    vendor: 'Neo',
+    model: 'NAS-AB02B2',
+    modelId: 'TS0601',
+    description: 'Alarm',
+    powerSource: 'Battery',
+    zigbeeType: 'EndDevice',
+    settable: ['alarm', 'volume', 'duration', 'melody'],
+    defaults: () => ({ alarm: false, volume: 'medium', duration: 10, melody: 1, battery: 100 }),
+    props: [
+      { name: 'alarm', label: 'Alarm', kind: 'bool', labels: { true: 'sounding', false: 'silent' } },
+      { name: 'volume', label: 'Volume', kind: 'enum', values: ['low', 'medium', 'high'] },
+      { name: 'duration', label: 'Duration', kind: 'number', min: 1, max: 1800, step: 1, unit: 's' },
+      { name: 'melody', label: 'Melody', kind: 'number', min: 1, max: 18, step: 1 },
+      P_BATTERY,
+    ],
+    exposes: [
+      { type: 'binary', name: 'alarm', label: 'Alarm', property: 'alarm', access: 3, value_on: true, value_off: false, description: 'Sound the alarm' },
+      { type: 'enum', name: 'volume', label: 'Volume', property: 'volume', access: 3, values: ['low', 'medium', 'high'], description: 'Volume of the alarm' },
+      numeric('duration', 'Duration', 's', 'How long the alarm sounds', { access: 3, value_min: 1, value_max: 1800 }),
+      numeric('melody', 'Melody', undefined, 'Which melody is played', { access: 3, value_min: 1, value_max: 18 }),
+      EXP_BATTERY,
+      EXP_LINKQUALITY,
+    ],
+  },
+
   button: {
     label: 'Button',
     vendor: 'Aqara',
@@ -296,11 +438,31 @@ export const TYPES = {
     defaults: () => ({ battery: 100 }),
     props: [P_BATTERY],
     get exposes() {
-      return [
-        EXP_BATTERY,
-        { type: 'enum', name: 'action', label: 'Action', property: 'action', access: 1, values: this.actions, description: 'Triggered action (e.g. a button click)', category: 'diagnostic' },
-        EXP_LINKQUALITY,
-      ];
+      return actionExposes(this.actions);
+    },
+  },
+
+  dial: {
+    label: 'Dial remote (4 buttons and rotation)',
+    vendor: 'Philips',
+    model: '8719514440937',
+    modelId: 'RDM002',
+    description: 'Hue Tap dial switch',
+    powerSource: 'Battery',
+    zigbeeType: 'EndDevice',
+    actions: [
+      ...[1, 2, 3, 4].flatMap((n) => ['press', 'press_release', 'hold', 'hold_release'].map((kind) => `button_${n}_${kind}`)),
+      ...['left', 'right'].flatMap((side) => ['step', 'slow', 'fast'].map((kind) => `dial_rotate_${side}_${kind}`)),
+    ],
+    /** What the real remote reports along with a rotation. */
+    actionExtra: (action) => {
+      const m = /^dial_rotate_(left|right)_(step|slow|fast)$/.exec(action);
+      return m ? { action_direction: m[1], action_type: m[2] === 'step' ? 'step' : 'rotate', action_time: { step: 0, slow: 15, fast: 60 }[m[2]] } : {};
+    },
+    defaults: () => ({ battery: 100 }),
+    props: [P_BATTERY],
+    get exposes() {
+      return actionExposes(this.actions);
     },
   },
 };
@@ -396,6 +558,23 @@ function derive(dev) {
     else if (s.local_temperature < s.occupied_heating_setpoint - 0.2) s.running_state = 'heat';
     else if (s.local_temperature >= s.occupied_heating_setpoint) s.running_state = 'idle';
   }
+  if (dev.type === 'trv') {
+    // The valve opens in proportion to how far the room is below the setpoint (fully open at 2.5 °C).
+    const paused = s.system_mode === 'off' || s.window_detection === 'ON';
+    s.pi_heating_demand = paused ? 0 : clamp(Math.ceil((s.occupied_heating_setpoint - s.local_temperature) * 8) * 5, 0, 100);
+    s.running_state = s.pi_heating_demand > 0 ? 'heat' : 'idle';
+  }
+  if (dev.type === 'lock') s.lock_state = s.state === 'LOCK' ? 'locked' : 'unlocked';
+  if (dev.type === 'presence') s.presence_event = s.presence ? 'enter' : 'leave';
+}
+
+// ---------------------------------------------------------------- firmware (OTA updates)
+
+const FIRMWARE = 16777220; // Zigbee file versions are plain numbers
+
+/** The firmware of a device: { installed, latest, state: idle | available | updating, progress?, remaining? } */
+export function otaOf(dev) {
+  return (dev.ota ??= { installed: FIRMWARE, latest: FIRMWARE, state: 'idle' });
 }
 
 /** Applies a set of values to a device. Returns true if something was accepted. */
@@ -431,6 +610,8 @@ export function applyValues(dev, values) {
 export function statePayload(dev) {
   const s = { ...dev.state };
   if (dev.type === 'plug') s.energy = round(s.energy, 3);
+  const { installed, latest, state, progress, remaining } = otaOf(dev);
+  s.update = { state, installed_version: installed, latest_version: latest, ...(state === 'updating' ? { progress, remaining } : {}) };
   return s;
 }
 
@@ -442,12 +623,14 @@ export function observables(type) {
     const label = type === 'cover' && p.name === 'state' ? 'State' : p.label;
     return { ...p, label, values: p.values.filter((v) => v !== 'TOGGLE' && v !== 'STOP') };
   });
-  return [...own, ...(t.observe || [])];
+  const update = { name: 'update_state', label: 'Firmware update', kind: 'enum', values: ['idle', 'available', 'updating'] };
+  return [...own, ...(t.observe || []), update];
 }
 
 /** Current value of something from observables(); a light's colour is reported as #rrggbb. */
 export function observe(dev, property) {
   if (dev.type === 'light' && property === 'color') return lightHex(dev.state);
+  if (property === 'update_state') return otaOf(dev).state;
   return dev.state[property];
 }
 
@@ -474,12 +657,13 @@ export function bridgeDeviceEntry(dev) {
       description: t.description,
       exposes: t.exposes,
       options: [],
-      supports_ota: false,
+      supports_ota: true,
       source: 'native',
     },
     power_source: t.powerSource,
     model_id: t.modelId,
     manufacturer: t.vendor,
+    software_build_id: String(otaOf(dev).installed),
     interview_completed: true,
     interviewing: false,
     interview_state: 'SUCCESSFUL',
@@ -551,7 +735,7 @@ export function buildDiscovery(dev, ctx) {
     sensor('current', 'Current', { device_class: 'current', unit_of_measurement: 'A' });
     sensor('voltage', 'Voltage', { device_class: 'voltage', unit_of_measurement: 'V' });
   }
-  if (dev.type === 'thermostat') {
+  if (dev.type === 'thermostat' || dev.type === 'trv') {
     add('climate', 'climate', {
       name: null,
       temperature_unit: 'C',
@@ -570,6 +754,71 @@ export function buildDiscovery(dev, ctx) {
       action_topic: stateTopic,
       action_template: "{% set values = {None:None,'idle':'idle','heat':'heating','cool':'cooling','fan_only':'fan'} %}{{ values[value_json.running_state] }}",
     });
+  }
+  if (dev.type === 'trv') {
+    sensor('pi_heating_demand', 'Valve position', { unit_of_measurement: '%', icon: 'mdi:radiator' });
+    add('switch', 'window_detection', {
+      name: 'Window open mode',
+      icon: 'mdi:window-open-variant',
+      state_topic: stateTopic,
+      command_topic: `${stateTopic}/set/window_detection`,
+      value_template: '{{ value_json.window_detection }}',
+      payload_on: 'ON',
+      payload_off: 'OFF',
+    });
+  }
+  if (dev.type === 'lock') {
+    add('lock', 'lock', {
+      name: null,
+      state_topic: stateTopic,
+      command_topic: `${stateTopic}/set`,
+      value_template: '{{ value_json.state }}',
+      payload_lock: 'LOCK',
+      payload_unlock: 'UNLOCK',
+      state_locked: 'LOCK',
+      state_unlocked: 'UNLOCK',
+    });
+  }
+  if (dev.type === 'siren') {
+    add('switch', 'alarm', {
+      name: 'Alarm',
+      icon: 'mdi:alarm-light',
+      state_topic: stateTopic,
+      command_topic: `${stateTopic}/set/alarm`,
+      value_template: "{{ 'ON' if value_json.alarm else 'OFF' }}",
+      state_on: 'ON',
+      state_off: 'OFF',
+      payload_on: 'true',
+      payload_off: 'false',
+    });
+    add('select', 'volume', {
+      name: 'Volume',
+      entity_category: 'config',
+      state_topic: stateTopic,
+      command_topic: `${stateTopic}/set/volume`,
+      value_template: '{{ value_json.volume }}',
+      options: ['low', 'medium', 'high'],
+    });
+    add('number', 'duration', {
+      name: 'Duration',
+      entity_category: 'config',
+      state_topic: stateTopic,
+      command_topic: `${stateTopic}/set/duration`,
+      value_template: '{{ value_json.duration }}',
+      min: 1,
+      max: 1800,
+      unit_of_measurement: 's',
+    });
+  }
+  if (dev.type === 'presence') {
+    binarySensor('presence', 'presence');
+    sensor('presence_event', 'Presence event', { state_class: undefined, device_class: 'enum', options: ['enter', 'leave'] });
+  }
+  if (dev.type === 'air') {
+    sensor('co2', 'CO2', { device_class: 'carbon_dioxide', unit_of_measurement: 'ppm' });
+    sensor('voc', 'VOC', { device_class: 'volatile_organic_compounds_parts', unit_of_measurement: 'ppb' });
+    sensor('temperature', 'Temperature', { device_class: 'temperature', unit_of_measurement: '°C' });
+    sensor('humidity', 'Humidity', { device_class: 'humidity', unit_of_measurement: '%' });
   }
   if (dev.type === 'cover') {
     add('cover', 'cover', {
@@ -611,7 +860,7 @@ export function buildDiscovery(dev, ctx) {
       max_mireds: COLOR_TEMP_MAX,
     });
   }
-  if (dev.type === 'button') {
+  if (t.actions) {
     add('event', 'action', {
       name: 'Action',
       state_topic: stateTopic,
@@ -638,6 +887,16 @@ export function buildDiscovery(dev, ctx) {
   if (t.powerSource === 'Battery') {
     sensor('battery', 'Battery', { device_class: 'battery', unit_of_measurement: '%', entity_category: 'diagnostic' });
   }
+  add('update', 'update', {
+    name: null,
+    device_class: 'firmware',
+    entity_category: 'config',
+    state_topic: stateTopic,
+    value_template: "{{ {'installed_version': value_json['update']['installed_version'] | string, 'latest_version': value_json['update']['latest_version'] | string, "
+      + "'in_progress': value_json['update']['state'] == 'updating', 'update_percentage': value_json['update'].get('progress')} | tojson }}",
+    command_topic: `${ctx.base}/bridge/request/device/ota_update/update`,
+    payload_install: JSON.stringify({ id: dev.ieee }),
+  });
   sensor('linkquality', 'Linkquality', {
     unit_of_measurement: 'lqi',
     icon: 'mdi:signal',

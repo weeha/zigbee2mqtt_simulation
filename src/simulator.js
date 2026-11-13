@@ -7,7 +7,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import mqtt from 'mqtt';
 import { DAY, SPEEDS, clockDefaults, environment, formatTime, parseTime } from './clock.js';
-import { TYPES, applyValues, bridgeDeviceEntry, buildDiscovery, lightHex, observables, statePayload } from './devices.js';
+import { TYPES, applyValues, bridgeDeviceEntry, buildDiscovery, lightHex, observables, otaOf, statePayload } from './devices.js';
 
 export const VERSION = '2.6.3-sim';
 const LOG_SIZE = 300;
@@ -20,6 +20,12 @@ const AIRING_RATE = 0.02; // share of the gap to outdoors that one open window c
 const LEAK_RATE = 0.0003; // the same for a closed room (walls)
 const SETTLE_RATE = 0.002; // humidity settling at REST_HUMIDITY while the windows are closed
 const REST_HUMIDITY = 50;
+const CO2_OUTDOORS = 420; // ppm
+const CO2_PER_PERSON = 3; // ppm per second somebody is in the room
+const CO2_SETTLE_RATE = 0.0005; // a closed, empty room slowly returns to outdoor air
+const WINDOW_DROP = 1.5; // °C within WINDOW_SPAN that make a thermostat assume an open window
+const WINDOW_SPAN = 30; // seconds
+const OTA_SECONDS = 30; // how long a simulated firmware update takes
 const LAMP_LUX = 150; // what one lamp at full brightness adds to the room
 const REPORT_INTERVAL = 10; // seconds between reports of a metering plug / a simulated thermostat
 
@@ -49,7 +55,10 @@ export class Simulator extends EventEmitter {
     this.permitJoin = false;
     this.nextReport = new Map();
     this.moving = new Map(); // cover id -> target position
-    this.clearAt = new Map(); // motion sensor id -> time at which occupancy clears
+    this.clearAt = new Map(); // motion sensor / siren id -> time at which it clears by itself
+    this.trails = new Map(); // thermostat id -> recent temperatures [{ at, temperature }]
+    this.autoWindow = new Set(); // thermostats that switched to window open mode by themselves
+    this.updating = new Map(); // device id -> { started, respond } while a firmware update runs
     this.load();
     this.ticker = setInterval(() => this.tick(), 1000);
     this.clockAt = Date.now();
@@ -405,6 +414,17 @@ export class Simulator extends EventEmitter {
           this.removeDevice(dev.id);
           return respond({ id: msg.id, block: false, force: false });
         }
+        case 'device/ota_update/check': {
+          const dev = findDev(msg.id);
+          if (!dev) return respond(null, `Device '${msg.id}' does not exist`);
+          return respond({ id: msg.id, update_available: otaOf(dev).state === 'available' });
+        }
+        case 'device/ota_update/update': {
+          const dev = findDev(msg.id);
+          if (!dev) return respond(null, `Device '${msg.id}' does not exist`);
+          // answered when the update has finished
+          return void this.startUpdate(dev, (from, to) => respond({ id: msg.id, from: { software_build_id: String(from) }, to: { software_build_id: String(to) } }));
+        }
         default:
           return respond(null, `Request '${request}' is not supported by the simulator`);
       }
@@ -421,31 +441,46 @@ export class Simulator extends EventEmitter {
     return dev;
   }
 
-  validateName(name, exceptId) {
+  validateName(name, exceptId, { unique = true } = {}) {
     name = String(name ?? '').trim();
     if (!name) throw fail('A name is required');
     if (/[#+]/.test(name) || name.startsWith('/') || name.endsWith('/')) throw fail('The name must not contain # or + or start/end with /');
     if (/(^|\/)(set|get)(\/|$)/.test(name) || name === 'bridge' || name.startsWith('bridge/')) throw fail('The name must not use the reserved words bridge, set or get as a topic level');
-    if (this.devices.some((d) => d.id !== exceptId && d.friendly_name === name)) throw fail(`A device named '${name}' already exists`);
+    if (unique && this.devices.some((d) => d.id !== exceptId && d.friendly_name === name)) throw fail(`A device named '${name}' already exists`);
     return name;
   }
 
-  addDevice({ type, friendly_name, room }) {
+  /** `saved` (import only) brings back the address, values and settings of an exported device. */
+  addDevice({ type, friendly_name, room }, saved = {}) {
     const t = TYPES[type];
     if (!t) throw fail('Unknown device type');
-    const ieee = randomIeee(type === 'light' ? '00178801' : '00158d00');
+    const reuse = /^0x[0-9a-f]{16}$/.test(saved.ieee ?? '') && !this.devices.some((d) => d.ieee === saved.ieee);
+    const ieee = reuse ? saved.ieee : randomIeee(type === 'light' ? '00178801' : '00158d00');
+    // Only values of the kind the device type knows are taken over.
+    const restore = (defaults, given) => {
+      for (const [key, value] of Object.entries(defaults)) {
+        const v = given?.[key];
+        if (v === null || typeof v !== typeof value) continue;
+        if (typeof value === 'number' && !Number.isFinite(v)) continue;
+        if (typeof value === 'object' && !Object.keys(value).every((k) => Number.isFinite(v[k]))) continue;
+        defaults[key] = v;
+      }
+      return defaults;
+    };
     const dev = {
       id: ieee,
       ieee,
       type,
       friendly_name: this.validateName(friendly_name),
       room: String(room ?? '').trim(),
-      available: true,
+      available: saved.available !== false,
       network_address: crypto.randomInt(1, 65000),
       linkquality: crypto.randomInt(70, 200),
-      state: t.defaults(),
-      sim: t.sim ? t.sim() : {},
+      state: restore(t.defaults(), saved.state),
+      sim: restore(t.sim ? t.sim() : {}, saved.sim),
     };
+    if (Number.isInteger(saved.firmware) && saved.firmware > 0) dev.ota = { installed: saved.firmware, latest: saved.firmware, state: 'idle' };
+    applyValues(dev, {}); // settles what follows from the values
     this.devices.push(dev);
     this.publish('bridge/event', { type: 'device_joined', data: { friendly_name: dev.friendly_name, ieee_address: ieee } });
     this.publish('bridge/event', {
@@ -506,6 +541,16 @@ export class Simulator extends EventEmitter {
       if (dev.state.occupancy && dev.sim.timeout > 0) this.clearAt.set(dev.id, Date.now() + dev.sim.timeout * 1000);
       else this.clearAt.delete(dev.id);
     }
+    if (dev.type === 'siren' && ('alarm' in values || 'duration' in values)) {
+      // a siren stops by itself after its duration
+      if (dev.state.alarm) this.clearAt.set(dev.id, Date.now() + dev.state.duration * 1000);
+      else this.clearAt.delete(dev.id);
+    }
+    if (dev.type === 'trv' && 'window_detection' in values) {
+      // set by hand or by Home Assistant: the thermostat no longer ends it by itself
+      this.autoWindow.delete(dev.id);
+      this.trails.delete(dev.id);
+    }
     return changed;
   }
 
@@ -538,7 +583,10 @@ export class Simulator extends EventEmitter {
       // Setting what a device measures means: the room itself is now that warm / humid.
       if (dev.type === 'sensor' && 'temperature' in values) room.temperature = dev.state.temperature;
       if (dev.type === 'sensor' && 'humidity' in values) room.humidity = dev.state.humidity;
-      if (dev.type === 'thermostat' && 'local_temperature' in values) room.temperature = dev.state.local_temperature;
+      if ((dev.type === 'thermostat' || dev.type === 'trv') && 'local_temperature' in values) room.temperature = dev.state.local_temperature;
+      if (dev.type === 'air') {
+        for (const key of ['temperature', 'humidity', 'co2']) if (key in values) room[key] = dev.state[key];
+      }
     }
     this.publishState(dev);
     this.changed();
@@ -547,10 +595,11 @@ export class Simulator extends EventEmitter {
 
   pressButton(id, action) {
     const dev = this.getDevice(id);
-    if (dev.type !== 'button') throw fail('This device is not a button');
-    if (!TYPES.button.actions.includes(action)) throw fail(`Unknown action '${action}'`);
+    const t = TYPES[dev.type];
+    if (!t.actions) throw fail('This device is not a remote');
+    if (!t.actions.includes(action)) throw fail(`Unknown action '${action}'`);
     if (!dev.available) throw fail('The device is offline');
-    this.publishState(dev, { action });
+    this.publishState(dev, { action, ...t.actionExtra?.(action) });
     this.publish(`${dev.friendly_name}/action`, action);
     dev.last_action = { action, ts: Date.now() };
     this.changed();
@@ -563,6 +612,9 @@ export class Simulator extends EventEmitter {
     this.nextReport.delete(id);
     this.moving.delete(id);
     this.clearAt.delete(id);
+    this.trails.delete(id);
+    this.autoWindow.delete(id);
+    this.updating.delete(id);
     this.publish('bridge/event', { type: 'device_leave', data: { ieee_address: dev.ieee, friendly_name: dev.friendly_name } });
     this.publishBridgeDevices();
     this.publishBridgeInfo();
@@ -665,6 +717,77 @@ export class Simulator extends EventEmitter {
     }
   }
 
+  // ------------------------------------------------------------ firmware updates (OTA)
+
+  /** offer: a newer firmware appears; install: what Home Assistant's "Install" does; withdraw: the offer disappears. */
+  firmware(id, action) {
+    const dev = this.getDevice(id);
+    const ota = otaOf(dev);
+    if (action === 'install') return void this.startUpdate(dev);
+    if (ota.state === 'updating') throw fail('The update is being installed');
+    if (action === 'offer') Object.assign(ota, { latest: ota.installed + 1, state: 'available' });
+    else if (action === 'withdraw') Object.assign(ota, { latest: ota.installed, state: 'idle' });
+    else throw fail(`Unknown firmware action '${action}'`);
+    this.publishState(dev);
+    this.changed();
+  }
+
+  startUpdate(dev, respond) {
+    const ota = otaOf(dev);
+    if (ota.state === 'updating') throw fail(`Update of '${dev.friendly_name}' is already in progress`);
+    if (ota.state !== 'available') throw fail(`No update available for '${dev.friendly_name}'`);
+    if (!dev.available) throw fail(`Device '${dev.friendly_name}' is offline`);
+    Object.assign(ota, { state: 'updating', progress: 0, remaining: OTA_SECONDS });
+    this.updating.set(dev.id, { started: Date.now(), respond });
+    this.publishState(dev);
+    this.changed();
+  }
+
+  /** Moves running updates forward; called once per second. */
+  advanceUpdates(now) {
+    for (const [id, { started, respond }] of this.updating) {
+      const dev = this.devices.find((d) => d.id === id);
+      if (!dev) continue;
+      const ota = otaOf(dev);
+      const elapsed = (now - started) / 1000;
+      if (elapsed < OTA_SECONDS) {
+        Object.assign(ota, { progress: Math.round((elapsed / OTA_SECONDS) * 100), remaining: Math.ceil(OTA_SECONDS - elapsed) });
+      } else {
+        const from = ota.installed;
+        dev.ota = { installed: ota.latest, latest: ota.latest, state: 'idle' };
+        this.updating.delete(id);
+        this.publishBridgeDevices(); // the new firmware version shows up there
+        respond?.(from, dev.ota.installed);
+      }
+      this.publishState(dev);
+      this.changed();
+    }
+  }
+
+  /** A thermostat with window detection pauses heating when the temperature suddenly drops. */
+  detectWindow(dev, now) {
+    const s = dev.state;
+    const trail = (this.trails.get(dev.id) ?? []).filter((p) => now - p.at <= WINDOW_SPAN * 1000);
+    trail.push({ at: now, temperature: s.local_temperature });
+    this.trails.set(dev.id, trail);
+    if (!dev.sim.detect) return;
+    let next;
+    if (s.window_detection === 'OFF') {
+      if (Math.max(...trail.map((p) => p.temperature)) - s.local_temperature >= WINDOW_DROP) next = 'ON';
+    } else if (this.autoWindow.has(dev.id)) {
+      // back to normal once the temperature has stopped falling for ten seconds
+      const recent = trail.filter((p) => now - p.at <= 10500);
+      if (recent.length >= 10 && recent[0].temperature - s.local_temperature < 0.2) next = 'OFF';
+    }
+    if (!next) return;
+    applyValues(dev, { window_detection: next });
+    if (next === 'ON') this.autoWindow.add(dev.id);
+    else this.autoWindow.delete(dev.id);
+    this.trails.set(dev.id, [{ at: now, temperature: s.local_temperature }]);
+    this.publishState(dev);
+    this.changed();
+  }
+
   // ------------------------------------------------------------ room physics
 
   /** The room of a device, if that room simulates its climate and light. An outdoor sensor is not in the room. */
@@ -687,6 +810,7 @@ export class Simulator extends EventEmitter {
         ?? average(devices.filter((d) => d.type === 'thermostat').map((d) => d.state.local_temperature)) ?? 21;
       room.humidity = average(sensors.map((d) => d.state.humidity)) ?? REST_HUMIDITY;
     }
+    if (room.physics && room.co2 === undefined) room.co2 = devices.find((d) => d.type === 'air')?.state.co2 ?? 600;
     for (const [key, value, min, max] of [['temperature', temperature, -40, 80], ['humidity', humidity, 0, 100]]) {
       if (value === undefined) continue;
       if (!(Number(value) >= min && Number(value) <= max)) throw fail(`${key} must be between ${min} and ${max}`);
@@ -711,14 +835,23 @@ export class Simulator extends EventEmitter {
       const of = (type) => devices.filter((d) => d.type === type);
 
       const open = of('window').filter((d) => d.state.contact === false).length;
-      const heating = of('thermostat').filter((d) => d.state.running_state === 'heat').length;
+      // a plain thermostat is open or shut, one with a valve position heats in proportion to it
+      const heating = of('thermostat').filter((d) => d.state.running_state === 'heat').length
+        + of('trv').reduce((sum, d) => sum + d.state.pi_heating_demand / 100, 0);
       // A room without a radiator keeps its temperature while closed: nothing could warm it up again.
-      const leak = of('thermostat').length ? LEAK_RATE : 0;
+      const leak = of('thermostat').length + of('trv').length ? LEAK_RATE : 0;
       const exchange = Math.min(1, (leak + open * AIRING_RATE) * seconds);
       room.temperature += heating * HEAT_RATE * seconds + (env.outdoor_temperature - room.temperature) * exchange;
       room.humidity += open
         ? (env.outdoor_humidity - room.humidity) * Math.min(1, open * AIRING_RATE * seconds)
         : (REST_HUMIDITY - room.humidity) * SETTLE_RATE * seconds;
+
+      // people breathe: every sensor that sees somebody counts as one person
+      const people = of('presence').filter((d) => d.state.presence).length + of('motion').filter((d) => d.state.occupancy).length;
+      room.co2 ??= 600;
+      room.co2 += people * CO2_PER_PERSON * seconds
+        + (CO2_OUTDOORS - room.co2) * Math.min(1, (CO2_SETTLE_RATE + open * AIRING_RATE) * seconds);
+      room.co2 = Math.min(5000, Math.max(350, room.co2));
 
       const blinds = of('cover');
       const openness = blinds.length ? blinds.reduce((sum, d) => sum + d.state.position, 0) / blinds.length / 100 : 1;
@@ -734,7 +867,11 @@ export class Simulator extends EventEmitter {
           dev.sim.base = { temperature, humidity };
           if (!dev.sim.auto && (s.temperature !== temperature || s.humidity !== humidity)) values = dev.sim.base;
         }
-        if (dev.type === 'thermostat' && s.local_temperature !== temperature) values = { local_temperature: temperature };
+        if ((dev.type === 'thermostat' || dev.type === 'trv') && s.local_temperature !== temperature) values = { local_temperature: temperature };
+        if (dev.type === 'air') {
+          const co2 = Math.round(room.co2 / 5) * 5; // reported in steps of 5 ppm
+          if (s.temperature !== temperature || s.humidity !== humidity || s.co2 !== co2) values = { temperature, humidity, co2 };
+        }
         if (dev.type === 'motion') {
           const illuminance = Math.round((env.daylight / 100) * (dev.sim.peak ?? DEFAULT_PEAK) * openness + lamps);
           if (illuminance !== s.illuminance) values = { illuminance };
@@ -754,6 +891,7 @@ export class Simulator extends EventEmitter {
     if (this.clockPublished !== formatTime(this.clock.minutes)) this.publishClock();
     this.followClock();
     this.roomPhysics();
+    this.advanceUpdates(now);
     for (const dev of this.devices) {
       if (!dev.available) continue;
       const s = dev.state;
@@ -766,6 +904,16 @@ export class Simulator extends EventEmitter {
         if (s.position === target) this.moving.delete(dev.id);
         this.publishState(dev);
         this.changed();
+        continue;
+      }
+      if (dev.type === 'trv') this.detectWindow(dev, now);
+      if (dev.type === 'siren' && now >= (this.clearAt.get(dev.id) ?? Infinity)) {
+        this.clearAt.delete(dev.id);
+        if (s.alarm) {
+          s.alarm = false;
+          this.publishState(dev);
+          this.changed();
+        }
         continue;
       }
       if (dev.type === 'motion' && now >= (this.clearAt.get(dev.id) ?? Infinity)) {
@@ -820,7 +968,7 @@ export class Simulator extends EventEmitter {
     const { password, ...config } = this.config;
     const types = {};
     for (const [key, t] of Object.entries(TYPES)) {
-      types[key] = { label: t.label, vendor: t.vendor, model: t.model, description: t.description, props: t.props, observe: observables(key), actions: t.actions || [], battery: t.powerSource === 'Battery' };
+      types[key] = { label: t.label, vendor: t.vendor, model: t.model, description: t.description, props: t.props, observe: observables(key), actions: t.actions || [], simFields: Object.keys(t.simFields || {}), battery: t.powerSource === 'Battery' };
     }
     return {
       version: VERSION,
@@ -829,6 +977,7 @@ export class Simulator extends EventEmitter {
       types,
       devices: this.devices.map((d) => ({
         ...d,
+        ota: otaOf(d),
         ui: d.type === 'light' ? { hex: lightHex(d.state) } : d.type === 'cover' ? { target: this.moving.get(d.id) ?? null } : {},
       })),
       scenarios: this.scenarios,
@@ -836,7 +985,7 @@ export class Simulator extends EventEmitter {
       rooms: Object.fromEntries([...new Set(this.devices.map((d) => d.room).filter(Boolean))].map((name) => {
         const room = this.rooms[name];
         return [name, room?.physics
-          ? { physics: true, temperature: Math.round(room.temperature * 10) / 10, humidity: Math.round(room.humidity) }
+          ? { physics: true, temperature: Math.round(room.temperature * 10) / 10, humidity: Math.round(room.humidity), co2: Math.round(room.co2 ?? 600) }
           : { physics: false }];
       })),
     };

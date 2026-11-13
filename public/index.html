@@ -17,6 +17,9 @@
     </div>
     <div class="actions">
       <button class="pill" id="mqtt-status" title="MQTT connection settings"><span class="dot"></span><span id="mqtt-text">connecting…</span></button>
+      <button id="btn-import" class="ghost" title="Load a home from a JSON file">Import</button>
+      <button id="btn-export" class="ghost" title="Download this home (devices, rooms, scenarios) as a JSON file">Export</button>
+      <input id="import-file" type="file" accept=".json,application/json" hidden>
       <button id="btn-demo" class="ghost">Create demo home</button>
       <button id="btn-add" class="primary">+ Add device</button>
     </div>

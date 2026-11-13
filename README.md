@@ -17,7 +17,7 @@ click the connection pill in the top right corner to change broker URL, credenti
 
 No broker at hand? `npm run broker` starts a throw-away one on port 1883.
 
-Click **Create demo home** for 27 devices in 6 rooms plus example scenarios, or **+ Add device**
+Click **Create demo home** for 33 devices in 6 rooms plus example scenarios, or **+ Add device**
 to build your own home.
 
 ## Devices
@@ -34,8 +34,37 @@ to build your own home.
 | Roller blind | IKEA FYRTUR (E1757) | Open / stop / close and target position; the blind moves at 10 % per second |
 | Water leak sensor | Aqara SJCGQ11LM | Leak / dry, battery |
 | Smoke detector | Aqara JTYJ-GD-01LM/BW | Smoke / clear, battery |
+| Radiator thermostat with valve position | Bosch BTH-RA | Like the thermostat, plus a valve position (0-100 %, in proportion to how far the room is below the setpoint) and a window open mode that pauses heating. It switches to that mode by itself when the temperature drops by 1.5 °C within 30 s |
+| Air quality sensor | Tuya TS0601_air_quality_sensor | CO₂, VOC, temperature, humidity |
+| Presence sensor (mmWave) | Aqara FP1 (RTCZCGQ11LM) | Somebody is here / nobody - stays on until you clear it |
+| Door lock | Yale YRD226HA2619 | Lock / unlock - also over MQTT |
+| Siren | Neo NAS-AB02B2 | Alarm on / off, volume, duration; stops by itself after the duration - also over MQTT |
+| Dial remote | Philips Hue Tap dial (8719514440937) | Four buttons (press, hold, release) and a dial that turns left / right in steps, slowly or fast |
 
 Every device also has an availability switch (simulates a device dropping off the network).
+
+### Firmware updates (OTA)
+
+Every card has a firmware line. **Offer update** makes a newer firmware available: the device
+reports it in its state (`update.state` = `available`) and Home Assistant shows it on the
+device's update entity. Installing it - from Home Assistant, with **Install** on the card or
+with `bridge/request/device/ota_update/update` - takes 30 seconds, during which the device
+reports `updating` with a progress, and ends with the new version installed.
+
+## Import and export
+
+**Export** downloads the home as one JSON file: devices with their current values and
+addresses, rooms, the sun and weather settings and all scenarios. The MQTT connection is
+not part of it, so the file contains no broker address or password and can be shared or
+kept in a repository. Scenarios refer to devices by name, which keeps the file readable.
+
+**Import** loads such a file and asks how:
+
+- *Add to the current home* skips devices and scenarios whose name already exists.
+- *Replace the current home* removes all devices and scenarios first.
+
+Imported devices keep their IEEE address, so Home Assistant recognises them as the same
+devices as before.
 
 ## Simulated clock, sun and weather
 
@@ -67,7 +96,8 @@ other. The room then has a temperature and a humidity of its own, shown in the h
 | What happens | Effect on the room |
 | --- | --- |
 | A window is open | Temperature and humidity move towards the outdoor values of the simulated weather - about a third of the way in 20 s |
-| A thermostat is heating | The room warms up by 0.05 °C per second |
+| A thermostat is heating | The room warms up by 0.05 °C per second; one with a valve position heats in proportion to it |
+| Somebody is in the room | CO₂ rises by 3 ppm per second for every presence or motion sensor that sees somebody; an open window airs it out towards 420 ppm. An air quality sensor reports it |
 | Everything is closed | A room with a thermostat slowly loses heat to the outside, humidity settles at 50 % |
 | A blind closes | Less daylight: the illuminance scales with how far the blinds are open |
 | A lamp is on | Up to 150 lx more, depending on its brightness |
@@ -145,10 +175,10 @@ With the default base topic `zigbee2mqtt`:
 | `zigbee2mqtt/bridge/event` | `device_joined`, `device_interview`, `device_leave` |
 | `zigbee2mqtt/<name>` | Device state as JSON, e.g. `{"temperature":21.5,"humidity":48,"battery":100,"linkquality":120}` |
 | `zigbee2mqtt/<name>/availability` | `{"state":"online"}` / `offline` (retained) |
-| `zigbee2mqtt/<name>/set` | Commands. Light: `state`, `brightness`, `color_temp`, `color` (`x`/`y`, `hue`/`saturation`, `r`/`g`/`b`, `hex`). Plug: `state`. Thermostat: `occupied_heating_setpoint`, `system_mode`. Blind: `state` (`OPEN`/`CLOSE`/`STOP`), `position` |
+| `zigbee2mqtt/<name>/set` | Commands. Light: `state`, `brightness`, `color_temp`, `color` (`x`/`y`, `hue`/`saturation`, `r`/`g`/`b`, `hex`). Plug: `state`. Thermostat: `occupied_heating_setpoint`, `system_mode`. Blind: `state` (`OPEN`/`CLOSE`/`STOP`), `position`. Thermostat with valve: also `window_detection` (`ON`/`OFF`). Lock: `state` (`LOCK`/`UNLOCK`). Siren: `alarm` (`true`/`false`), `volume`, `duration`, `melody` |
 | `zigbee2mqtt/<name>/get` | Makes the device publish its state |
 | `zigbee2mqtt/<name>/action` | Button action as plain text (used by the HA device triggers) |
-| `zigbee2mqtt/bridge/request/...` | Supported: `health_check`, `permit_join`, `restart`, `device/rename`, `device/remove` |
+| `zigbee2mqtt/bridge/request/...` | Supported: `health_check`, `permit_join`, `restart`, `device/rename`, `device/remove`, `device/ota_update/check`, `device/ota_update/update` |
 | `homeassistant/.../config` | MQTT discovery for every entity (retained) |
 
 When `homeassistant/status` reports `online`, all states are published again.
@@ -177,11 +207,14 @@ The UI uses a small JSON API which is handy for automated tests as well:
 
 ```text
 GET    /api/state
-POST   /api/devices                {type: light|plug|thermostat|cover|sensor|motion|window|leak|smoke|button, friendly_name, room}
+POST   /api/devices                {type: light|plug|thermostat|trv|cover|sensor|air|motion|presence|window|leak|smoke|lock|siren|button|dial, friendly_name, room}
 PATCH  /api/devices/:id            {state: {temperature: 19}, available, friendly_name, room, sim: {auto, interval, outdoor, sun, peak}}
 PUT    /api/rooms                  {name, physics: true|false, temperature, humidity}
 PUT    /api/clock                  {time: "07:30"|"now", speed: 1|60|300|600|1800|3600, running, sunrise, sunset, temp_min, temp_max}
 POST   /api/devices/:id/action     {action: "single"}
+POST   /api/devices/:id/firmware   {action: offer|install|withdraw}
+GET    /api/export                 the home as JSON
+POST   /api/import                 {home: <exported JSON>, mode: merge|replace}
 DELETE /api/devices/:id
 POST   /api/scenarios/:id/run      /stop
 POST   /api/scenarios/:id/run?wait=1   answers when the scenario has finished: {status: passed|failed|stopped|done, checks, failures}

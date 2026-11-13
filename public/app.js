@@ -34,6 +34,13 @@ const ICONS = {
   cover: '<rect x="4" y="3" width="16" height="18" rx="1"/><path d="M4 7h16M4 11h16M4 15h16"/>',
   leak: '<path d="M12 3s6 6.5 6 11a6 6 0 0 1-12 0c0-4.5 6-11 6-11z"/>',
   smoke: '<circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="2"/><path d="M12 5.5V7M12 17v1.5M5.5 12H7M17 12h1.5"/>',
+  trv: '<circle cx="12" cy="12" r="8.5"/><path d="M12 12l3.5-3.5M7.5 16.5h9M12 3.5v2"/>',
+  air: '<path d="M3 8h10a3 3 0 1 0-3-3M3 12h15a3 3 0 1 1-3 3M3 16h7a2.5 2.5 0 1 1-2.5 2.5"/>',
+  presence: '<circle cx="12" cy="8" r="3"/><path d="M6 20c0-3.3 2.7-6 6-6s6 2.7 6 6M3.5 5a9 9 0 0 0 0 6M20.5 5a9 9 0 0 1 0 6"/>',
+  lock: '<rect x="5" y="11" width="14" height="10" rx="1.5"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/>',
+  lockOpen: '<rect x="5" y="11" width="14" height="10" rx="1.5"/><path d="M8 11V7a4 4 0 0 1 7.5-2"/>',
+  siren: '<path d="M7 18v-6a5 5 0 0 1 10 0v6M5 18h14v3H5zM12 3v2M4.5 6l1.5 1.5M19.5 6L18 7.5"/>',
+  dial: '<circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="4"/><path d="M12 3.5V6"/>',
   edit: '<path d="M4 20h4L19 9l-4-4L4 16v4z"/>',
   trash: '<path d="M5 7h14M10 7V4h4v3M7 7l1 13h8l1-13"/>',
 };
@@ -57,8 +64,9 @@ async function api(method, url, body) {
 const run = (...args) => api(...args).catch((err) => toast(err.message));
 
 let toastTimer;
-function toast(message) {
+function toast(message, ok = false) {
   const el = $('#toast');
+  el.classList.toggle('ok', ok);
   el.textContent = message;
   el.hidden = false;
   clearTimeout(toastTimer);
@@ -91,6 +99,8 @@ const BINARY = {
   window: { prop: 'contact', alarm: false, alarmText: 'Open', okText: 'Closed', alarmIcon: 'windowOpen', okIcon: 'window' },
   leak: { prop: 'water_leak', alarm: true, alarmText: 'Leak detected', okText: 'Dry', alarmIcon: 'leak', okIcon: 'leak' },
   smoke: { prop: 'smoke', alarm: true, alarmText: 'Smoke detected', okText: 'Clear', alarmIcon: 'smoke', okIcon: 'smoke' },
+  presence: { prop: 'presence', alarm: true, alarmText: 'Somebody is here', okText: 'Nobody', alarmIcon: 'presence', okIcon: 'presence' },
+  lock: { prop: 'state', alarm: 'UNLOCK', alarmText: 'Unlocked', okText: 'Locked', alarmIcon: 'lockOpen', okIcon: 'lock', flip: (v) => (v === 'LOCK' ? 'UNLOCK' : 'LOCK') },
 };
 
 // ---------------------------------------------------------------- reusable controls
@@ -214,7 +224,7 @@ function createCard(dev) {
     const title = h('b');
     const iconSlot = h('span');
     let value = null;
-    const btn = h('button', { class: 'contact', title: 'Click to toggle', onclick: () => setState({ [b.prop]: !value }) },
+    const btn = h('button', { class: 'contact', title: 'Click to toggle', onclick: () => setState({ [b.prop]: b.flip ? b.flip(value) : !value }) },
       iconSlot, h('div', {}, title, h('span', {}, 'Click to toggle')));
     body.append(btn);
     updaters.push((d) => {
@@ -307,6 +317,96 @@ function createCard(dev) {
     });
   }
 
+  if (dev.type === 'trv') {
+    const temp = h('div', { class: 'big' });
+    const running = h('span', { class: 'badge' });
+    const mode = select([['off', 'Off'], ['auto', 'Auto'], ['heat', 'Heat']], dev.state.system_mode, (v) => setState({ system_mode: v }));
+    const room = slider('Room temperature', { min: 5, max: 35, step: 0.1 }, (v) => `${v.toFixed(1)} °C`, (v) => setState({ local_temperature: v }));
+    const setpoint = slider('Setpoint', { min: 4, max: 35, step: 0.5 }, (v) => `${v.toFixed(1)} °C`, (v) => setState({ occupied_heating_setpoint: v }));
+    const valve = h('output');
+    const bar = h('i');
+    const windowMode = toggle((on) => setState({ window_detection: on ? 'ON' : 'OFF' }), 'Window open mode: heating is paused');
+    const detect = h('input', { type: 'checkbox', onchange: () => patch({ sim: { detect: detect.checked } }) });
+    body.append(
+      h('div', { class: 'row between' }, h('div', { class: 'row' }, temp, running), mode),
+      room.el,
+      setpoint.el,
+      h('div', { class: 'field' }, h('label', {}, 'Valve position'), valve, h('div', { class: 'meter' }, bar)),
+      h('div', { class: 'row between' }, h('span', {}, 'Window open mode'), windowMode.el),
+      h('label', { class: 'check', title: 'Switches to window open mode when the temperature drops by 1.5 °C within 30 s, and back when it stops falling' }, detect, 'Detects an open window by itself'),
+    );
+    updaters.push((d) => {
+      const heating = d.state.running_state === 'heat';
+      temp.replaceChildren(d.state.local_temperature.toFixed(1), h('small', {}, '°C'));
+      running.textContent = d.state.window_detection === 'ON' ? 'window open' : heating ? 'heating' : 'idle';
+      running.style.color = d.state.window_detection === 'ON' ? 'var(--warn)' : heating ? 'var(--accent)' : '';
+      if (document.activeElement !== mode) mode.value = d.state.system_mode;
+      room.set(d.state.local_temperature);
+      setpoint.set(d.state.occupied_heating_setpoint);
+      valve.textContent = `${d.state.pi_heating_demand} %`;
+      bar.style.width = `${d.state.pi_heating_demand}%`;
+      windowMode.set(d.state.window_detection === 'ON');
+      detect.checked = !!d.sim.detect;
+    });
+  }
+
+  if (dev.type === 'air') {
+    const co2 = h('div', { class: 'big' });
+    const voc = h('div', { class: 'big' });
+    const sliders = {
+      co2: slider('CO₂', { min: 350, max: 3000, step: 5 }, (v) => `${v} ppm`, (v) => setState({ co2: v })),
+      voc: slider('VOC', { min: 0, max: 2000, step: 5 }, (v) => `${v} ppb`, (v) => setState({ voc: v })),
+      temperature: slider('Temperature', { min: -10, max: 40, step: 0.1 }, (v) => `${v.toFixed(1)} °C`, (v) => setState({ temperature: v })),
+      humidity: slider('Humidity', { min: 0, max: 100, step: 0.5 }, (v) => `${v.toFixed(1)} %`, (v) => setState({ humidity: v })),
+    };
+    body.append(h('div', { class: 'readouts' }, co2, voc), ...Object.values(sliders).map((s) => s.el));
+    updaters.push((d) => {
+      co2.replaceChildren(String(d.state.co2), h('small', {}, 'ppm CO₂'));
+      co2.style.color = d.state.co2 >= 1400 ? 'var(--bad)' : d.state.co2 >= 1000 ? 'var(--warn)' : '';
+      voc.replaceChildren(String(d.state.voc), h('small', {}, 'ppb VOC'));
+      for (const [key, s] of Object.entries(sliders)) s.set(d.state[key]);
+    });
+  }
+
+  if (dev.type === 'siren') {
+    const status = h('div', { class: 'big' });
+    const alarm = toggle((on) => setState({ alarm: on }), 'Sound the alarm');
+    const volume = select([['low', 'Low'], ['medium', 'Medium'], ['high', 'High']], dev.state.volume, (v) => setState({ volume: v }));
+    const duration = numberBox({ min: 1, max: 1800, title: 'Seconds after which the siren stops by itself' }, (v) => setState({ duration: v }));
+    body.append(
+      h('div', { class: 'row between' }, status, alarm.el),
+      h('div', { class: 'row between' }, h('span', { class: 'row' }, 'Volume', volume), h('span', { class: 'row' }, 'stops after', duration.el, 's')),
+    );
+    updaters.push((d) => {
+      status.textContent = d.state.alarm ? 'Sounding' : 'Silent';
+      status.style.color = d.state.alarm ? 'var(--bad)' : '';
+      alarm.set(d.state.alarm);
+      if (document.activeElement !== volume) volume.value = d.state.volume;
+      duration.set(d.state.duration);
+    });
+  }
+
+  if (dev.type === 'dial') {
+    const fire = (action) => api('POST', `/api/devices/${id}/action`, { action });
+    // a short press is a press followed by its release, like on the real remote
+    const press = (n) => fire(`button_${n}_press`).then(() => fire(`button_${n}_press_release`)).catch((err) => toast(err.message));
+    const other = select(type.actions.map((a) => [a, a]), type.actions[0], () => {});
+    const last = h('div', { class: 'last' });
+    body.append(
+      h('div', { class: 'press four' }, [1, 2, 3, 4].map((n) => h('button', { title: `Press button ${n}`, onclick: () => press(n) }, String(n)))),
+      h('div', { class: 'press two' },
+        h('button', { title: 'One step to the left', onclick: () => fire('dial_rotate_left_step').catch((err) => toast(err.message)) }, '⟲ Turn left'),
+        h('button', { title: 'One step to the right', onclick: () => fire('dial_rotate_right_step').catch((err) => toast(err.message)) }, 'Turn right ⟳')),
+      h('div', { class: 'row' }, other, h('button', { onclick: () => fire(other.value).catch((err) => toast(err.message)) }, 'Send')),
+      last,
+    );
+    updaters.push((d) => {
+      last.textContent = d.last_action
+        ? `Last: ${d.last_action.action} at ${new Date(d.last_action.ts).toLocaleTimeString()}`
+        : 'Not used yet';
+    });
+  }
+
   if (dev.type === 'cover') {
     const position = h('div', { class: 'big' });
     const status = h('span', { class: 'hint' });
@@ -350,6 +450,27 @@ function createCard(dev) {
     updaters.push((d) => battery.set(d.state.battery));
   }
 
+  const firmware = h('div', { class: 'firmware' });
+  const fw = (action) => run('POST', `/api/devices/${id}/firmware`, { action });
+  let firmwareShown = '';
+  updaters.push((d) => {
+    const o = d.ota;
+    const signature = `${o.state}/${o.installed}/${o.latest}/${o.progress}`;
+    if (signature === firmwareShown) return;
+    firmwareShown = signature;
+    firmware.className = `firmware ${o.state}`;
+    if (o.state === 'idle') {
+      firmware.replaceChildren(`Firmware ${o.installed}`,
+        h('button', { class: 'ghost', title: 'A newer firmware becomes available - Home Assistant shows it as an update', onclick: () => fw('offer') }, 'Offer update'));
+    } else if (o.state === 'available') {
+      firmware.replaceChildren(`Update ${o.latest} available`,
+        h('button', { title: 'Install it, like the Install button in Home Assistant does', onclick: () => fw('install') }, 'Install'),
+        h('button', { class: 'ghost', onclick: () => fw('withdraw') }, 'Withdraw'));
+    } else {
+      firmware.replaceChildren(`Installing ${o.latest} … ${o.progress} %`);
+    }
+  });
+
   const card = h('article', { class: 'card' },
     h('div', { class: 'card-head' },
       h('div', { class: 'type-icon' }, icon(dev.type, 20)),
@@ -361,6 +482,7 @@ function createCard(dev) {
       } }, icon('trash', 16)),
     ),
     body,
+    firmware,
     h('div', { class: 'card-foot' }, topic, footRight),
   );
   card._update = (d) => {
@@ -434,7 +556,8 @@ function renderDevices() {
     const r = S.rooms[room];
     if (!r) { roomHeads.delete(room); continue; }
     head.physics.checked = r.physics;
-    head.climate.textContent = r.physics ? `${r.temperature.toFixed(1)} °C · ${r.humidity} %` : '';
+    const air = S.devices.some((d) => d.room === room && d.type === 'air');
+    head.climate.textContent = r.physics ? `${r.temperature.toFixed(1)} °C · ${r.humidity} %${air ? ` · ${r.co2} ppm` : ''}` : '';
   }
   for (const d of S.devices) cards.get(d.id)._update(d);
 }
@@ -532,8 +655,43 @@ function settingsDialog() {
   });
 }
 
+function exportHome() {
+  const link = h('a', { href: '/api/export', download: `zigbee2mqtt-home-${new Date().toISOString().slice(0, 10)}.json` });
+  document.body.append(link);
+  link.click();
+  link.remove();
+}
+
+async function importHome(file) {
+  let home;
+  try {
+    home = JSON.parse(await file.text());
+  } catch {
+    return toast(`${file.name} is not a JSON file`);
+  }
+  if (!Array.isArray(home?.devices)) return toast(`${file.name} is not a home exported from the simulator`);
+  const mode = (value, checked) => h('input', { type: 'radio', name: 'mode', value, checked });
+  const merge = mode('merge', true);
+  const replace = mode('replace', false);
+  openDialog({
+    title: 'Import home',
+    submit: 'Import',
+    body: [
+      h('p', { class: 'note' }, `${file.name}: ${home.devices.length} devices, ${home.scenarios?.length ?? 0} scenarios.`),
+      h('label', { class: 'check wrap' }, merge, 'Add to the current home - devices and scenarios whose name already exists are skipped'),
+      h('label', { class: 'check wrap' }, replace, `Replace the current home - removes all ${S.devices.length} devices and ${S.scenarios.length} scenarios first`),
+      h('p', { class: 'note' }, 'The MQTT connection is not part of the file and stays as it is.'),
+    ],
+    onSubmit: async () => {
+      const report = await api('POST', '/api/import', { home, mode: replace.checked ? 'replace' : 'merge' });
+      toast(`Imported ${report.devices} devices and ${report.scenarios} scenarios`
+        + (report.skipped.length ? `, skipped ${report.skipped.length}: ${report.skipped.slice(0, 3).join('; ')}${report.skipped.length > 3 ? ' …' : ''}` : ''), true);
+    },
+  });
+}
+
 function createDemo() {
-  if (confirm('Create a demo home (27 devices in 6 rooms) with example scenarios? Devices that already exist are kept.')) run('POST', '/api/demo');
+  if (confirm('Create a demo home (33 devices in 6 rooms) with example scenarios? Devices that already exist are kept.')) run('POST', '/api/demo');
 }
 
 // ---------------------------------------------------------------- scenarios
@@ -630,6 +788,7 @@ function fixStep(step) {
     step.property = p.name;
     step.value = defaultValue(p, dev);
   }
+  if (step.type === 'press' && !S.types[dev.type].actions.includes(step.action)) step.action = S.types[dev.type].actions[0];
   if (step.type === 'expect') {
     let p = obsOf(dev, step.property);
     if (!p) {
@@ -680,7 +839,7 @@ function scenarioDialog(scenario) {
         }
       } else {
         const candidates = S.devices.filter((d) =>
-          step.type === 'press' ? d.type === 'button' : step.type === 'ramp' ? propsOf(d).some((p) => p.kind === 'number') : true);
+          step.type === 'press' ? S.types[d.type].actions.length > 0 : step.type === 'ramp' ? propsOf(d).some((p) => p.kind === 'number') : true);
         if (!candidates.some((d) => d.id === step.device)) step.device = '';
         row.append(select([['', '— choose device —'], ...candidates.map((d) => [d.id, d.friendly_name])], step.device, (id) => {
           step.device = id;
@@ -712,7 +871,7 @@ function scenarioDialog(scenario) {
             valueInput(step, prop), prop.unit ? h('span', {}, prop.unit) : '',
             h('span', { title: 'How long the automation under test may take. 0 = it must be true right now.' }, 'within'), num(step, 'seconds', { min: 0 }), h('span', {}, 's'));
         }
-        if (dev && step.type === 'press') row.append(select(S.types.button.actions.map((a) => [a, a]), step.action, (a) => (step.action = a)));
+        if (dev && step.type === 'press') row.append(select(S.types[dev.type].actions.map((a) => [a, a]), step.action, (a) => (step.action = a)));
         if (dev && step.type === 'availability') row.append(select([['false', 'goes offline'], ['true', 'comes back online']], String(!!step.available), (v) => (step.available = v === 'true')));
       }
       const move = (delta) => {
@@ -842,6 +1001,13 @@ for (const tab of document.querySelectorAll('.tabs button')) {
 }
 $('#btn-add').addEventListener('click', () => deviceDialog());
 $('#btn-demo').addEventListener('click', createDemo);
+$('#btn-export').addEventListener('click', exportHome);
+$('#btn-import').addEventListener('click', () => $('#import-file').click());
+$('#import-file').addEventListener('change', (e) => {
+  const [file] = e.target.files;
+  e.target.value = ''; // so that the same file can be chosen again
+  if (file) importHome(file);
+});
 $('#btn-scenario').addEventListener('click', () => scenarioDialog());
 $('#clock-play').addEventListener('click', () => setClock({ running: !S.clock.running }));
 $('#clock-speed').addEventListener('change', (e) => setClock({ speed: Number(e.target.value) }));

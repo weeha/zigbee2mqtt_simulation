@@ -292,6 +292,12 @@ export class ScenarioRunner {
       ['Kitchen', 'smoke', 'Kitchen Smoke Detector'],
       ['Bathroom', 'plug', 'Washing Machine'],
       ['Bathroom', 'leak', 'Bathroom Leak Sensor'],
+      ['Hallway', 'lock', 'Front Door Lock'],
+      ['Hallway', 'siren', 'Hallway Siren'],
+      ['Living Room', 'presence', 'Living Room Presence'],
+      ['Living Room', 'air', 'Living Room Air Quality'],
+      ['Living Room', 'dial', 'Living Room Dial'],
+      ['Kitchen', 'trv', 'Kitchen Thermostat'],
       ['Outside', 'sensor', 'Outdoor Climate', { outdoor: true }],
       ['Outside', 'motion', 'Terrace Motion', { sun: true, peak: 8000 }],
     ];
@@ -418,6 +424,30 @@ export class ScenarioRunner {
           { type: 'press', device: id['Living Room Switch'], action: 'double' },
           { type: 'press', device: id['Bedside Button'], action: 'hold' },
           { type: 'until', time: '23:00' },
+        ],
+      },
+      {
+        name: 'Evening on the sofa: the air gets stuffy',
+        steps: [
+          { type: 'set', device: id['Living Room Presence'], property: 'presence', value: true },
+          { type: 'press', device: id['Living Room Dial'], action: 'button_1_press' },
+          { type: 'press', device: id['Living Room Dial'], action: 'dial_rotate_left_step' },
+          { type: 'ramp', device: id['Living Room Air Quality'], property: 'co2', to: 1500, seconds: 40 },
+          { type: 'wait', seconds: 20 },
+          { type: 'set', device: id['Living Room Window'], property: 'contact', value: false },
+          { type: 'wait', seconds: 40 },
+          { type: 'set', device: id['Living Room Window'], property: 'contact', value: true },
+          { type: 'set', device: id['Living Room Presence'], property: 'presence', value: false },
+        ],
+      },
+      {
+        name: 'Leaving the house: the door is locked',
+        steps: [
+          { type: 'set', device: id['Hallway Motion'], property: 'occupancy', value: true },
+          { type: 'set', device: id['Front Door Lock'], property: 'state', value: 'UNLOCK' },
+          { type: 'wait', seconds: 8 },
+          { type: 'set', device: id['Front Door Lock'], property: 'state', value: 'LOCK' },
+          { type: 'set', device: id['Living Room Presence'], property: 'presence', value: false },
         ],
       },
       {
