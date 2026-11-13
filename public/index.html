@@ -22,6 +22,19 @@
     </div>
   </header>
 
+  <section class="clock" aria-label="Simulated clock">
+    <button id="clock-play" title="Start / pause the simulated clock"></button>
+    <b id="clock-time">--:--</b>
+    <select id="clock-speed" title="How fast the simulated time passes"></select>
+    <div class="clock-day">
+      <input id="clock-slider" type="range" min="0" max="1439" step="1" aria-label="Time of day">
+      <div id="clock-track" class="clock-track"></div>
+    </div>
+    <span id="clock-env" class="clock-env"></span>
+    <button id="clock-now" class="ghost" title="Set the clock to the real time">Now</button>
+    <button id="clock-settings" class="ghost" title="Sunrise, sunset and outdoor temperature">Sun &amp; weather</button>
+  </section>
+
   <nav class="tabs" role="tablist">
     <button role="tab" data-tab="devices" aria-selected="true">Devices</button>
     <button role="tab" data-tab="scenarios" aria-selected="false">Scenarios</button>

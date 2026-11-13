@@ -6,11 +6,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import mqtt from 'mqtt';
+import { DAY, SPEEDS, clockDefaults, environment, formatTime, parseTime } from './clock.js';
 import { TYPES, applyValues, bridgeDeviceEntry, buildDiscovery, lightHex, observables, statePayload } from './devices.js';
 
 export const VERSION = '2.6.3-sim';
 const LOG_SIZE = 300;
 const COVER_SPEED = 10; // percent per second
+const CLOCK_STEP = 250; // milliseconds between two steps of the simulated clock
+const DEFAULT_PEAK = 400; // lx a sun-following motion sensor sees at noon
 const REPORT_INTERVAL = 10; // seconds between reports of a metering plug / a simulated thermostat
 
 const randomIeee = (prefix) => '0x' + prefix + crypto.randomBytes(4).toString('hex');
@@ -30,6 +33,7 @@ export class Simulator extends EventEmitter {
     };
     this.devices = [];
     this.scenarios = [];
+    this.clock = clockDefaults();
     this.log = [];
     this.client = null;
     this.connected = false;
@@ -40,6 +44,8 @@ export class Simulator extends EventEmitter {
     this.clearAt = new Map(); // motion sensor id -> time at which occupancy clears
     this.load();
     this.ticker = setInterval(() => this.tick(), 1000);
+    this.clockAt = Date.now();
+    this.clockTicker = setInterval(() => this.advanceClock(), CLOCK_STEP);
   }
 
   // ------------------------------------------------------------ persistence
@@ -50,6 +56,7 @@ export class Simulator extends EventEmitter {
       Object.assign(this.config, data.config);
       this.devices = (data.devices || []).filter((d) => TYPES[d.type]);
       this.scenarios = data.scenarios || [];
+      Object.assign(this.clock, data.clock);
     } catch (err) {
       if (err.code !== 'ENOENT') console.error(`Could not read ${this.file}: ${err.message}`);
     }
@@ -63,7 +70,7 @@ export class Simulator extends EventEmitter {
   saveNow() {
     clearTimeout(this.saveTimer);
     fs.mkdirSync(path.dirname(this.file), { recursive: true });
-    const data = { config: this.config, devices: this.devices, scenarios: this.scenarios };
+    const data = { config: this.config, devices: this.devices, scenarios: this.scenarios, clock: this.clock };
     fs.writeFileSync(this.file, JSON.stringify(data, null, 2));
   }
 
@@ -178,6 +185,7 @@ export class Simulator extends EventEmitter {
     this.publish('bridge/groups', [], { retain: true });
     this.publish('bridge/extensions', [], { retain: true });
     this.publishBridgeDiscovery();
+    this.publishClock();
     for (const dev of this.devices) this.announce(dev);
   }
 
@@ -219,29 +227,55 @@ export class Simulator extends EventEmitter {
     this.publish('bridge/devices', [coordinator, ...this.devices.map(bridgeDeviceEntry)], { retain: true });
   }
 
-  bridgeDiscoveryTopic() {
-    return `${this.config.discovery_prefix}/binary_sensor/sim_bridge_${this.config.coordinator_ieee}/connection_state/config`;
+  /** Entities of the bridge device: its connection state, plus the simulated clock, sun and weather. */
+  bridgeDiscovery() {
+    const ieee = this.config.coordinator_ieee;
+    const simulation = `${this.base}/bridge/simulation`;
+    const entities = [
+      ['binary_sensor', 'connection_state', {
+        name: 'Connection state', device_class: 'connectivity', entity_category: 'diagnostic',
+        state_topic: `${this.base}/bridge/state`, value_template: '{{ value_json.state }}', payload_on: 'online', payload_off: 'offline',
+      }],
+      ['sensor', 'simulated_time', { name: 'Simulated time', icon: 'mdi:clock-outline', state_topic: simulation, value_template: '{{ value_json.time }}' }],
+      ['binary_sensor', 'simulated_sun', {
+        name: 'Simulated sun', device_class: 'light', state_topic: simulation, value_template: '{{ value_json.sun }}',
+        payload_on: 'above_horizon', payload_off: 'below_horizon',
+      }],
+      ['sensor', 'simulated_daylight', {
+        name: 'Simulated daylight', icon: 'mdi:white-balance-sunny', unit_of_measurement: '%', state_class: 'measurement',
+        state_topic: simulation, value_template: '{{ value_json.daylight }}',
+      }],
+      ['sensor', 'simulated_outdoor_temperature', {
+        name: 'Simulated outdoor temperature', device_class: 'temperature', unit_of_measurement: '°C', state_class: 'measurement',
+        state_topic: simulation, value_template: '{{ value_json.outdoor_temperature }}',
+      }],
+    ];
+    return entities.map(([component, object, payload]) => ({
+      topic: `${this.config.discovery_prefix}/${component}/sim_bridge_${ieee}/${object}/config`,
+      payload: {
+        ...payload,
+        unique_id: `bridge_${ieee}_${object}_zigbee2mqtt`,
+        device: {
+          identifiers: [`zigbee2mqtt_bridge_${ieee}`],
+          name: 'Zigbee2MQTT Bridge (simulated)',
+          manufacturer: 'Zigbee2MQTT',
+          model: 'Bridge',
+          sw_version: VERSION,
+        },
+        origin: { name: 'Zigbee2MQTT Simulator', sw: VERSION, url: 'https://www.zigbee2mqtt.io' },
+      },
+    }));
   }
 
   publishBridgeDiscovery() {
-    this.publishRaw(this.bridgeDiscoveryTopic(), {
-      name: 'Connection state',
-      device_class: 'connectivity',
-      entity_category: 'diagnostic',
-      state_topic: `${this.base}/bridge/state`,
-      value_template: '{{ value_json.state }}',
-      payload_on: 'online',
-      payload_off: 'offline',
-      unique_id: `bridge_${this.config.coordinator_ieee}_connection_state_zigbee2mqtt`,
-      device: {
-        identifiers: [`zigbee2mqtt_bridge_${this.config.coordinator_ieee}`],
-        name: 'Zigbee2MQTT Bridge (simulated)',
-        manufacturer: 'Zigbee2MQTT',
-        model: 'Bridge',
-        sw_version: VERSION,
-      },
-      origin: { name: 'Zigbee2MQTT Simulator', sw: VERSION, url: 'https://www.zigbee2mqtt.io' },
-    }, { retain: true });
+    for (const { topic, payload } of this.bridgeDiscovery()) this.publishRaw(topic, payload, { retain: true });
+  }
+
+  /** The simulated time, sun and weather - for automations that depend on the time of day. */
+  publishClock() {
+    const { speed, running } = this.clock;
+    this.clockPublished = formatTime(this.clock.minutes);
+    this.publish('bridge/simulation', { ...environment(this.clock), speed, running }, { retain: true });
   }
 
   /** Discovery + availability + current state of one device. */
@@ -269,8 +303,8 @@ export class Simulator extends EventEmitter {
 
   clearAllRetained() {
     for (const dev of this.devices) this.clearRetained(dev);
-    this.publishRaw(this.bridgeDiscoveryTopic(), '', { retain: true });
-    for (const t of ['info', 'devices', 'groups', 'extensions', 'state']) this.publish(`bridge/${t}`, '', { retain: true });
+    for (const { topic } of this.bridgeDiscovery()) this.publishRaw(topic, '', { retain: true });
+    for (const t of ['info', 'devices', 'groups', 'extensions', 'simulation', 'state']) this.publish(`bridge/${t}`, '', { retain: true });
   }
 
   // ------------------------------------------------------------ incoming MQTT
@@ -537,10 +571,89 @@ export class Simulator extends EventEmitter {
     this.emit('change');
   }
 
+  // ------------------------------------------------------------ simulated clock, sun and weather
+
+  advanceClock() {
+    const now = Date.now();
+    const elapsed = now - this.clockAt;
+    this.clockAt = now;
+    if (!this.clock.running) return;
+    const before = formatTime(this.clock.minutes);
+    this.clock.minutes = (this.clock.minutes + (elapsed * this.clock.speed) / 60000) % DAY;
+    if (formatTime(this.clock.minutes) !== before) this.emit('change');
+  }
+
+  setClock(patch) {
+    const next = { ...this.clock };
+    if (patch.time !== undefined) {
+      const minutes = parseTime(patch.time);
+      if (minutes === undefined) throw fail('The time must look like 07:30');
+      next.minutes = minutes;
+    }
+    if (patch.minutes !== undefined) {
+      const minutes = Number(patch.minutes);
+      if (!(minutes >= 0 && minutes < DAY)) throw fail('minutes must be between 0 and 1439');
+      next.minutes = minutes;
+    }
+    if (patch.speed !== undefined) {
+      if (!SPEEDS.includes(Number(patch.speed))) throw fail(`The speed must be one of ${SPEEDS.join(', ')}`);
+      next.speed = Number(patch.speed);
+    }
+    if (patch.running !== undefined) next.running = !!patch.running;
+    for (const key of ['sunrise', 'sunset']) {
+      if (patch[key] === undefined) continue;
+      const minutes = typeof patch[key] === 'number' ? patch[key] : parseTime(patch[key]);
+      if (!(minutes >= 0 && minutes < DAY)) throw fail(`${key} must look like 06:30`);
+      next[key] = minutes;
+    }
+    for (const key of ['temp_min', 'temp_max']) {
+      if (patch[key] === undefined) continue;
+      const value = Number(patch[key]);
+      if (!(value >= -40 && value <= 50)) throw fail(`${key} must be between -40 and 50`);
+      next[key] = value;
+    }
+    if (next.sunset - next.sunrise < 60) throw fail('The sun must set at least an hour after it rises');
+    if (next.temp_max < next.temp_min) throw fail('The warmest temperature must not be below the coldest');
+    this.clock = next;
+    this.clockAt = Date.now();
+    this.publishClock();
+    this.followClock();
+    this.changed();
+    return this.clockView();
+  }
+
+  clockView() {
+    return { ...this.clock, ...environment(this.clock) };
+  }
+
+  /** Devices that follow the sun or the weather take their values from the clock. */
+  followClock() {
+    const env = environment(this.clock);
+    for (const dev of this.devices) {
+      let values;
+      if (dev.type === 'motion' && dev.sim.sun) {
+        const illuminance = Math.round((env.daylight / 100) * (dev.sim.peak ?? DEFAULT_PEAK));
+        if (illuminance !== dev.state.illuminance) values = { illuminance };
+      }
+      if (dev.type === 'sensor' && dev.sim.outdoor) {
+        // with "auto drift" the periodic report wanders around this instead
+        dev.sim.base = { temperature: env.outdoor_temperature, humidity: env.outdoor_humidity };
+        const s = dev.state;
+        if (!dev.sim.auto && (s.temperature !== env.outdoor_temperature || s.humidity !== env.outdoor_humidity)) values = dev.sim.base;
+      }
+      if (!values || !dev.available) continue;
+      applyValues(dev, values);
+      this.publishState(dev);
+      this.changed();
+    }
+  }
+
   // ------------------------------------------------------------ things that happen over time
 
   tick() {
     const now = Date.now();
+    if (this.clockPublished !== formatTime(this.clock.minutes)) this.publishClock();
+    this.followClock();
     for (const dev of this.devices) {
       if (!dev.available) continue;
       const s = dev.state;
@@ -583,9 +696,10 @@ export class Simulator extends EventEmitter {
       if (dev.type === 'sensor') {
         // wander around the value that was set by hand
         const base = dev.sim.base || s;
+        const pull = dev.sim.outdoor ? 1 : 0.2; // an outdoor sensor keeps up with the weather
         applyValues(dev, {
-          temperature: s.temperature + (base.temperature - s.temperature) * 0.2 + (Math.random() - 0.5) * 0.4,
-          humidity: s.humidity + (base.humidity - s.humidity) * 0.2 + (Math.random() - 0.5) * 1.6,
+          temperature: s.temperature + (base.temperature - s.temperature) * pull + (Math.random() - 0.5) * 0.4,
+          humidity: s.humidity + (base.humidity - s.humidity) * pull + (Math.random() - 0.5) * 1.6,
         });
       }
       if (dev.type === 'thermostat') {
@@ -617,11 +731,13 @@ export class Simulator extends EventEmitter {
         ui: d.type === 'light' ? { hex: lightHex(d.state) } : d.type === 'cover' ? { target: this.moving.get(d.id) ?? null } : {},
       })),
       scenarios: this.scenarios,
+      clock: { ...this.clockView(), speeds: SPEEDS },
     };
   }
 
   async shutdown() {
     clearInterval(this.ticker);
+    clearInterval(this.clockTicker);
     this.saveNow();
     await this.disconnect();
   }

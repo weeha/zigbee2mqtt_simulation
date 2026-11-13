@@ -143,6 +143,7 @@ function createCard(dev) {
     const hSlider = slider('Humidity', { min: 0, max: 100, step: 0.5 }, (v) => `${v.toFixed(1)} %`, (v) => setState({ humidity: v }));
     const auto = h('input', { type: 'checkbox', onchange: () => patch({ sim: { auto: auto.checked } }) });
     const interval = numberBox({ min: 1, max: 3600, title: 'Report interval in seconds' }, (v) => patch({ sim: { interval: v } }));
+    const outdoor = h('input', { type: 'checkbox', onchange: () => patch({ sim: { outdoor: outdoor.checked } }) });
     body.append(
       h('div', { class: 'readouts' }, temp, hum),
       tSlider.el,
@@ -150,6 +151,7 @@ function createCard(dev) {
       h('div', { class: 'row between' },
         h('label', { class: 'check', title: 'Let the values wander around the set point and report periodically' }, auto, 'Auto drift'),
         h('span', { class: 'row' }, 'every', interval.el, 's')),
+      h('label', { class: 'check', title: 'Temperature and humidity follow the simulated weather (see the clock bar)' }, outdoor, 'Outdoor sensor: follows the weather'),
     );
     updaters.push((d) => {
       temp.replaceChildren(d.state.temperature.toFixed(1), h('small', {}, '°C'));
@@ -158,6 +160,9 @@ function createCard(dev) {
       hSlider.set(d.state.humidity);
       auto.checked = !!d.sim.auto;
       interval.set(d.sim.interval);
+      outdoor.checked = !!d.sim.outdoor;
+      tSlider.el.classList.toggle('follows', !!d.sim.outdoor);
+      hSlider.el.classList.toggle('follows', !!d.sim.outdoor);
     });
   }
 
@@ -226,11 +231,16 @@ function createCard(dev) {
     const clear = h('button', { class: 'ghost', onclick: () => setState({ occupancy: false }) }, 'Clear');
     const lux = slider('Illuminance', { min: 0, max: 1000, step: 1 }, (v) => `${v} lx`, (v) => setState({ illuminance: v }));
     const timeout = numberBox({ min: 0, max: 3600, title: 'Seconds without motion until occupancy clears (0 = never)' }, (v) => patch({ sim: { timeout: v } }));
+    const sun = h('input', { type: 'checkbox', onchange: () => patch({ sim: { sun: sun.checked } }) });
+    const peak = numberBox({ min: 0, max: 10000, title: 'Illuminance at noon' }, (v) => patch({ sim: { peak: v } }));
     body.append(
       status,
       h('div', { class: 'row' }, trigger, clear),
       lux.el,
       h('div', { class: 'row' }, 'Clears after', timeout.el, 's'),
+      h('div', { class: 'row between' },
+        h('label', { class: 'check', title: 'The illuminance follows the simulated daylight (see the clock bar)' }, sun, 'Follows the sun'),
+        h('span', { class: 'row' }, 'up to', peak.el, 'lx')),
     );
     updaters.push((d) => {
       status.textContent = d.state.occupancy ? 'Motion' : 'Clear';
@@ -238,6 +248,9 @@ function createCard(dev) {
       clear.disabled = !d.state.occupancy;
       lux.set(d.state.illuminance);
       timeout.set(d.sim.timeout);
+      sun.checked = !!d.sim.sun;
+      peak.set(d.sim.peak ?? 400);
+      lux.el.classList.toggle('follows', !!d.sim.sun);
     });
   }
 
@@ -492,12 +505,13 @@ function settingsDialog() {
 }
 
 function createDemo() {
-  if (confirm('Create a demo home (25 devices in 5 rooms) with example scenarios? Devices that already exist are kept.')) run('POST', '/api/demo');
+  if (confirm('Create a demo home (27 devices in 6 rooms) with example scenarios? Devices that already exist are kept.')) run('POST', '/api/demo');
 }
 
 // ---------------------------------------------------------------- scenarios
 
-const STEP_TYPES = [['wait', 'Wait'], ['set', 'Set value'], ['ramp', 'Change gradually'], ['press', 'Press button'], ['availability', 'Go offline / online'], ['expect', 'Expect (test)']];
+const STEP_TYPES = [['wait', 'Wait'], ['set', 'Set value'], ['ramp', 'Change gradually'], ['press', 'Press button'], ['availability', 'Go offline / online'], ['expect', 'Expect (test)'], ['clock', 'Set clock'], ['until', 'Wait until (clock)']];
+const NO_DEVICE = ['wait', 'clock', 'until']; // steps that are not about a device
 const OPS = { eq: 'is', ne: 'is not', lt: '<', le: '≤', gt: '>', ge: '≥' };
 const propsOf = (dev) => S.types[dev.type].props;
 const propOf = (dev, name) => propsOf(dev).find((p) => p.name === name);
@@ -509,6 +523,8 @@ const isTest = (sc) => sc.steps.some((s) => s.type === 'expect');
 
 function describeStep(step) {
   if (step.type === 'wait') return { text: `Wait ${step.seconds} s` };
+  if (step.type === 'clock') return { text: `Set the clock to ${step.time}${step.speed ? ` at ${speedLabel(step.speed)}` : ''}` };
+  if (step.type === 'until') return { text: `Wait until ${step.time} on the clock` };
   const dev = byId(step.device);
   if (!dev) return { text: `${step.type}: device no longer exists`, missing: true };
   const name = dev.friendly_name;
@@ -620,12 +636,20 @@ function scenarioDialog(scenario) {
     steps.replaceChildren(...draft.steps.map((step, i) => {
       const row = h('div', { class: 'step' },
         select(STEP_TYPES, step.type, (type) => {
-          draft.steps[i] = { type, seconds: type === 'expect' ? 30 : 5, device: step.device || '', action: 'single', available: false, op: 'eq' };
+          draft.steps[i] = { type, seconds: type === 'expect' ? 30 : 5, device: step.device || '', action: 'single', available: false, op: 'eq', time: type === 'clock' ? '06:00' : '07:00', speed: 0 };
           fixStep(draft.steps[i]);
           renderSteps();
         }));
       if (step.type === 'wait') {
         row.append(num(step, 'seconds', { min: 0 }), h('span', {}, 'seconds'));
+      } else if (step.type === 'clock' || step.type === 'until') {
+        row.append(h('input', { type: 'time', required: true, value: step.time, oninput: (e) => (step.time = e.target.value) }));
+        if (step.type === 'clock') {
+          row.append(h('span', {}, 'and run at'),
+            select([[0, 'the current speed'], ...S.clock.speeds.map((v) => [v, speedLabel(v)])], step.speed, (v) => (step.speed = Number(v))));
+        } else {
+          row.append(h('span', {}, 'simulated time - the clock has to be running'));
+        }
       } else {
         const candidates = S.devices.filter((d) =>
           step.type === 'press' ? d.type === 'button' : step.type === 'ramp' ? propsOf(d).some((p) => p.kind === 'number') : true);
@@ -688,10 +712,51 @@ function scenarioDialog(scenario) {
       h('div', {}, h('button', { type: 'button', onclick: () => { draft.steps.push({ type: 'wait', seconds: 5 }); renderSteps(); } }, '+ Add step')),
     ],
     onSubmit: () => {
-      if (draft.steps.some((s) => s.type !== 'wait' && !byId(s.device))) throw new Error('Every step needs a device - choose one or remove the step.');
+      if (draft.steps.some((s) => !NO_DEVICE.includes(s.type) && !byId(s.device))) throw new Error('Every step needs a device - choose one or remove the step.');
       const body = { name: name.value, loop: loop.checked, steps: draft.steps };
       return scenario ? api('PUT', `/api/scenarios/${scenario.id}`, body) : api('POST', '/api/scenarios', body);
     },
+  });
+}
+
+// ---------------------------------------------------------------- simulated clock
+
+const speedLabel = (speed) => speed === 1 ? 'real time' : speed < 3600 ? `${speed / 60} min per second` : `${speed / 3600} h per second`;
+const hhmm = (minutes) => `${String(Math.floor(minutes / 60)).padStart(2, '0')}:${String(Math.floor(minutes % 60)).padStart(2, '0')}`;
+const setClock = (body) => run('PUT', '/api/clock', body);
+let clockBusyTimer;
+
+function renderClock() {
+  const c = S.clock;
+  const speed = $('#clock-speed');
+  if (!speed.options.length) speed.append(...c.speeds.map((v) => h('option', { value: v }, speedLabel(v))));
+  if (document.activeElement !== speed) speed.value = c.speed;
+  $('.clock').classList.toggle('paused', !c.running);
+  $('#clock-play').textContent = c.running ? '❚❚' : '▶';
+  const slider = $('#clock-slider');
+  if (!slider._busy) {
+    slider.value = Math.floor(c.minutes);
+    $('#clock-time').textContent = c.time;
+  }
+  const pct = (minutes) => `${((minutes / 1440) * 100).toFixed(1)}%`;
+  $('#clock-track').style.background = `linear-gradient(90deg, #2b3a67 ${pct(c.sunrise - 40)}, #f6c453 ${pct(c.sunrise + 40)}, #f6c453 ${pct(c.sunset - 40)}, #2b3a67 ${pct(c.sunset + 40)})`;
+  $('#clock-env').textContent = `${c.daylight > 0 ? `☀ ${c.daylight} % daylight` : '☾ night'} · ${c.outdoor_temperature.toFixed(1)} °C outside`;
+}
+
+function clockDialog() {
+  const c = S.clock;
+  const time = (minutes) => h('input', { type: 'time', required: true, value: hhmm(minutes) });
+  const temp = (value) => h('input', { type: 'number', required: true, min: -40, max: 50, step: 0.5, value });
+  const [sunrise, sunset, min, max] = [time(c.sunrise), time(c.sunset), temp(c.temp_min), temp(c.temp_max)];
+  openDialog({
+    title: 'Sun and weather',
+    body: [
+      h('div', { class: 'two' }, field('Sunrise', sunrise), field('Sunset', sunset)),
+      h('div', { class: 'two' }, field('Coldest outdoor temperature (at sunrise), °C', min), field('Warmest (mid-afternoon), °C', max)),
+      h('p', { class: 'note' }, 'Motion sensors set to "Follows the sun" and sensors set to "Outdoor sensor" take their values from this. '
+        + 'Home Assistant gets the simulated time, sun, daylight and outdoor temperature as entities of the simulated bridge.'),
+    ],
+    onSubmit: () => api('PUT', '/api/clock', { sunrise: sunrise.value, sunset: sunset.value, temp_min: Number(min.value), temp_max: Number(max.value) }),
   });
 }
 
@@ -733,6 +798,7 @@ function render() {
     : S.mqtt.error ? `not connected · ${S.mqtt.error}` : `connecting to ${S.config.mqtt_url}…`;
   const n = S.devices.length;
   $('#summary').textContent = `${n} device${n === 1 ? '' : 's'} · base topic "${S.config.base_topic}" · v${S.version}`;
+  renderClock();
   renderDevices();
   renderScenarios();
 }
@@ -749,6 +815,18 @@ for (const tab of document.querySelectorAll('.tabs button')) {
 $('#btn-add').addEventListener('click', () => deviceDialog());
 $('#btn-demo').addEventListener('click', createDemo);
 $('#btn-scenario').addEventListener('click', () => scenarioDialog());
+$('#clock-play').addEventListener('click', () => setClock({ running: !S.clock.running }));
+$('#clock-speed').addEventListener('change', (e) => setClock({ speed: Number(e.target.value) }));
+$('#clock-now').addEventListener('click', () => setClock({ time: 'now' }));
+$('#clock-settings').addEventListener('click', clockDialog);
+const sendClockTime = throttle((minutes) => setClock({ minutes }), 150);
+$('#clock-slider').addEventListener('input', (e) => {
+  e.target._busy = true;
+  clearTimeout(clockBusyTimer);
+  clockBusyTimer = setTimeout(() => (e.target._busy = false), 700);
+  $('#clock-time').textContent = hhmm(Number(e.target.value));
+  sendClockTime(Number(e.target.value));
+});
 $('#btn-tests').addEventListener('click', () => run('POST', '/api/tests/run'));
 $('#mqtt-status').addEventListener('click', settingsDialog);
 $('#log-filter').addEventListener('input', renderLog);

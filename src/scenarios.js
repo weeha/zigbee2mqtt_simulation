@@ -5,10 +5,11 @@
 // the expected value - typically because an automation reacted - or fails.
 
 import crypto from 'node:crypto';
+import { DAY, SPEEDS, formatTime, parseTime } from './clock.js';
 import { observables, observe } from './devices.js';
 
 const fail = (message, status = 400) => Object.assign(new Error(message), { status });
-const STEP_TYPES = ['wait', 'set', 'ramp', 'press', 'availability', 'expect'];
+const STEP_TYPES = ['wait', 'set', 'ramp', 'press', 'availability', 'expect', 'clock', 'until'];
 const OPS = { eq: '=', ne: '≠', lt: '<', le: '≤', gt: '>', ge: '≥' };
 const COLOR_TOLERANCE = 48; // colours survive the trip through x/y only approximately
 const MAX_FAILURES = 50;
@@ -46,6 +47,16 @@ function cleanStep(step) {
       return { type: 'press', device: String(step.device || ''), action: String(step.action || 'single') };
     case 'availability':
       return { type: 'availability', device: String(step.device || ''), available: !!step.available };
+    case 'clock': {
+      // speed 0 = leave the speed as it is
+      const speed = Number(step.speed) || 0;
+      if (parseTime(step.time) === undefined) throw fail('The time must look like 07:30');
+      if (speed && !SPEEDS.includes(speed)) throw fail(`The speed must be one of ${SPEEDS.join(', ')}`);
+      return { type: 'clock', time: formatTime(parseTime(step.time)), speed };
+    }
+    case 'until':
+      if (parseTime(step.time) === undefined) throw fail('The time must look like 07:30');
+      return { type: 'until', time: formatTime(parseTime(step.time)) };
     case 'expect':
       if (!(step.op in OPS)) throw fail(`Unknown comparison '${step.op}'`);
       return { type: 'expect', device: String(step.device || ''), property: String(step.property || ''), op: step.op, value: step.value, seconds };
@@ -185,6 +196,22 @@ export class ScenarioRunner {
     return { ok: results.length > 0 && results.every((r) => r.status === 'passed'), passed: count('passed'), failed: count('failed'), stopped: count('stopped'), results };
   }
 
+  /** Waits until the simulated clock reaches a time of day. */
+  async until(step, ctl) {
+    const sim = this.sim;
+    const target = parseTime(step.time);
+    const togo = () => (target - sim.clock.minutes + DAY) % DAY;
+    if (!sim.clock.running) throw fail(`Cannot wait until ${step.time}: the simulated clock is paused`);
+    let left = togo();
+    while (!ctl.abort) {
+      await this.sleep(ctl, 100);
+      const now = togo();
+      // The distance only jumps up when the clock has passed the time (or was set past it).
+      if (now > left + DAY / 2 || now < 0.01) return;
+      left = now;
+    }
+  }
+
   async expect(step, ctl) {
     const sim = this.sim;
     const deadline = Date.now() + step.seconds * 1000;
@@ -217,6 +244,10 @@ export class ScenarioRunner {
         return void sim.updateDevice(step.device, { available: step.available });
       case 'expect':
         return this.expect(step, ctl);
+      case 'clock':
+        return void sim.setClock({ time: step.time, running: true, ...(step.speed ? { speed: step.speed } : {}) });
+      case 'until':
+        return this.until(step, ctl);
       case 'ramp': {
         const dev = sim.getDevice(step.device);
         const from = Number(dev.state[step.property] ?? dev.sim[step.property]);
@@ -261,11 +292,14 @@ export class ScenarioRunner {
       ['Kitchen', 'smoke', 'Kitchen Smoke Detector'],
       ['Bathroom', 'plug', 'Washing Machine'],
       ['Bathroom', 'leak', 'Bathroom Leak Sensor'],
+      ['Outside', 'sensor', 'Outdoor Climate', { outdoor: true }],
+      ['Outside', 'motion', 'Terrace Motion', { sun: true, peak: 8000 }],
     ];
     const id = {};
-    for (const [room, type, friendly_name] of home) {
+    for (const [room, type, friendly_name, follow] of home) {
       const existing = sim.devices.find((d) => d.friendly_name === friendly_name);
       id[friendly_name] = (existing || sim.addDevice({ type, friendly_name, room })).id;
+      if (!existing && follow) sim.updateDevice(id[friendly_name], { sim: follow });
     }
     const scenarios = [
       {
@@ -348,6 +382,37 @@ export class ScenarioRunner {
           { type: 'set', device: id['Bathroom Leak Sensor'], property: 'water_leak', value: true },
           { type: 'wait', seconds: 30 },
           { type: 'set', device: id['Bathroom Leak Sensor'], property: 'water_leak', value: false },
+        ],
+      },
+      {
+        name: 'A day in the life (runs on the simulated clock)',
+        steps: [
+          { type: 'clock', time: '06:00', speed: 600 },
+          { type: 'until', time: '06:30' },
+          { type: 'press', device: id['Bedside Button'], action: 'single' },
+          { type: 'until', time: '06:45' },
+          { type: 'set', device: id['Hallway Motion'], property: 'occupancy', value: true },
+          { type: 'set', device: id['Coffee Machine'], property: 'state', value: 'ON' },
+          { type: 'set', device: id['Coffee Machine'], property: 'load', value: 1200 },
+          { type: 'until', time: '07:15' },
+          { type: 'set', device: id['Coffee Machine'], property: 'state', value: 'OFF' },
+          { type: 'until', time: '08:00' },
+          { type: 'set', device: id['Hallway Motion'], property: 'occupancy', value: true },
+          { type: 'press', device: id['Hallway Button'], action: 'double' },
+          { type: 'until', time: '13:00' },
+          { type: 'set', device: id['Washing Machine'], property: 'state', value: 'ON' },
+          { type: 'set', device: id['Washing Machine'], property: 'load', value: 2000 },
+          { type: 'until', time: '14:30' },
+          { type: 'set', device: id['Washing Machine'], property: 'load', value: 2 },
+          { type: 'until', time: '17:30' },
+          { type: 'set', device: id['Hallway Motion'], property: 'occupancy', value: true },
+          { type: 'press', device: id['Hallway Button'], action: 'single' },
+          { type: 'until', time: '18:00' },
+          { type: 'set', device: id['Living Room Motion'], property: 'occupancy', value: true },
+          { type: 'until', time: '22:30' },
+          { type: 'press', device: id['Living Room Switch'], action: 'double' },
+          { type: 'press', device: id['Bedside Button'], action: 'hold' },
+          { type: 'until', time: '23:00' },
         ],
       },
       {

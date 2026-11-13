@@ -193,8 +193,8 @@ export const TYPES = {
     powerSource: 'Battery',
     zigbeeType: 'EndDevice',
     defaults: () => ({ temperature: 21.5, humidity: 48, battery: 100 }),
-    sim: () => ({ auto: false, interval: 30 }),
-    simFields: { auto: 'bool', interval: [1, 3600] },
+    sim: () => ({ auto: false, interval: 30, outdoor: false }),
+    simFields: { auto: 'bool', interval: [1, 3600], outdoor: 'bool' }, // outdoor: follows the simulated weather
     props: [
       { name: 'temperature', label: 'Temperature', kind: 'number', min: -40, max: 80, step: 0.1, unit: '°C' },
       { name: 'humidity', label: 'Humidity', kind: 'number', min: 0, max: 100, step: 0.1, unit: '%' },
@@ -217,8 +217,8 @@ export const TYPES = {
     powerSource: 'Battery',
     zigbeeType: 'EndDevice',
     defaults: () => ({ occupancy: false, illuminance: 120, battery: 100 }),
-    sim: () => ({ timeout: 90 }),
-    simFields: { timeout: [0, 3600] },
+    sim: () => ({ timeout: 90, sun: false, peak: 400 }),
+    simFields: { timeout: [0, 3600], sun: 'bool', peak: [0, 10000] }, // sun: illuminance follows the daylight, up to "peak" lx
     props: [
       { name: 'occupancy', label: 'Occupancy', kind: 'bool', labels: { true: 'motion detected', false: 'clear' } },
       { name: 'illuminance', label: 'Illuminance', kind: 'number', min: 0, max: 10000, step: 1, unit: 'lx' },

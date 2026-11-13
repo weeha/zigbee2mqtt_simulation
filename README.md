@@ -17,7 +17,7 @@ click the connection pill in the top right corner to change broker URL, credenti
 
 No broker at hand? `npm run broker` starts a throw-away one on port 1883.
 
-Click **Create demo home** for 25 devices in 5 rooms plus example scenarios, or **+ Add device**
+Click **Create demo home** for 27 devices in 6 rooms plus example scenarios, or **+ Add device**
 to build your own home.
 
 ## Devices
@@ -37,6 +37,28 @@ to build your own home.
 
 Every device also has an availability switch (simulates a device dropping off the network).
 
+## Simulated clock, sun and weather
+
+The bar below the header is the simulated time of day. Press play and choose how fast it
+runs - from real time up to one hour per second, so a whole day passes in 24 seconds - or
+drag the slider to any time. It starts paused at the real time.
+
+From the time the simulator derives the daylight (0 % at night, 100 % at solar noon) and an
+outdoor temperature that is coldest at sunrise and warmest in mid-afternoon. Sunrise, sunset
+and the temperature range are set under **Sun & weather**. Two kinds of devices can follow it:
+
+- a motion sensor with **Follows the sun**: its illuminance rises and falls with the daylight,
+  up to the lx value you give it;
+- a temperature sensor with **Outdoor sensor**: it reports the outdoor temperature and humidity.
+
+Home Assistant's own clock and sun cannot be moved, so the simulator publishes its own as
+entities of the simulated bridge: *Simulated time*, *Simulated sun* (on while the sun is up),
+*Simulated daylight* and *Simulated outdoor temperature*. Use these as triggers in the
+automations you want to test instead of `sun.sun` or a time trigger.
+
+Only the environment follows the clock. Devices keep working in real seconds (a blind still
+takes 10 s, motion still clears after its timeout), and so do delays inside Home Assistant.
+
 ## Scenarios
 
 The **Scenarios** tab holds scripted sequences. A step can
@@ -46,6 +68,8 @@ The **Scenarios** tab holds scripted sequences. A step can
 - change a value gradually (temperature falls to 16 °C over 40 s),
 - press a button,
 - take a device offline / bring it back,
+- set the simulated clock, or wait until it reaches a time of day ("A day in the life" in the
+  demo home plays 17 hours in under two minutes this way),
 - expect a value (see below).
 
 Scenarios can loop and several can run at once. They only play the *physical world*; reacting
@@ -90,6 +114,7 @@ With the default base topic `zigbee2mqtt`:
 | --- | --- |
 | `zigbee2mqtt/bridge/state` | `{"state":"online"}` (retained, `offline` as last will) |
 | `zigbee2mqtt/bridge/info`, `bridge/devices`, `bridge/groups` | Bridge information and the device list including `exposes` (retained) |
+| `zigbee2mqtt/bridge/simulation` | Simulated clock, e.g. `{"time":"18:54","daylight":35,"sun":"above_horizon","outdoor_temperature":19.9,"outdoor_humidity":52,"speed":600,"running":true}` (retained; not part of the real Zigbee2MQTT) |
 | `zigbee2mqtt/bridge/event` | `device_joined`, `device_interview`, `device_leave` |
 | `zigbee2mqtt/<name>` | Device state as JSON, e.g. `{"temperature":21.5,"humidity":48,"battery":100,"linkquality":120}` |
 | `zigbee2mqtt/<name>/availability` | `{"state":"online"}` / `offline` (retained) |
@@ -126,7 +151,8 @@ The UI uses a small JSON API which is handy for automated tests as well:
 ```text
 GET    /api/state
 POST   /api/devices                {type: light|plug|thermostat|cover|sensor|motion|window|leak|smoke|button, friendly_name, room}
-PATCH  /api/devices/:id            {state: {temperature: 19}, available, friendly_name, room, sim: {auto, interval}}
+PATCH  /api/devices/:id            {state: {temperature: 19}, available, friendly_name, room, sim: {auto, interval, outdoor, sun, peak}}
+PUT    /api/clock                  {time: "07:30"|"now", speed: 1|60|300|600|1800|3600, running, sunrise, sunset, temp_min, temp_max}
 POST   /api/devices/:id/action     {action: "single"}
 DELETE /api/devices/:id
 POST   /api/scenarios/:id/run      /stop
@@ -134,4 +160,5 @@ POST   /api/scenarios/:id/run?wait=1   answers when the scenario has finished: {
 POST   /api/tests/run              runs all test scenarios and answers {ok, passed, failed, results}
 ```
 
-An expect step looks like `{type: "expect", device, property, op: eq|ne|lt|le|gt|ge, value, seconds}`.
+An expect step looks like `{type: "expect", device, property, op: eq|ne|lt|le|gt|ge, value, seconds}`,
+the clock steps like `{type: "clock", time: "06:00", speed: 600}` (speed 0 keeps the current one) and `{type: "until", time: "07:30"}`.

@@ -63,6 +63,15 @@ input[type=range] { width: 100%; accent-color: var(--accent); margin: 0; }
 .pill.ok .dot { background: var(--ok); }
 .pill.bad .dot { background: var(--bad); }
 
+.clock { display: flex; flex-wrap: wrap; gap: 10px 12px; align-items: center; padding: 8px 24px; background: var(--surface); border-bottom: 1px solid var(--border); }
+.clock #clock-play { width: 34px; padding: 5px 0; }
+.clock #clock-time { font-size: 20px; font-variant-numeric: tabular-nums; min-width: 58px; }
+.clock.paused #clock-time { color: var(--muted); }
+.clock-day { flex: 1 1 220px; min-width: 160px; }
+.clock-day input { display: block; }
+.clock-track { height: 4px; border-radius: 4px; margin-top: -1px; }
+.clock-env { color: var(--muted); font-size: 12px; white-space: nowrap; min-width: 190px; }
+.follows { opacity: .45; pointer-events: none; }
 .tabs { display: flex; gap: 4px; padding: 0 24px; background: var(--surface); border-bottom: 1px solid var(--border); }
 .tabs button { border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: none; padding: 10px 14px; color: var(--muted); }
 .tabs button[aria-selected=true] { color: var(--text); border-bottom-color: var(--accent); font-weight: 600; }
@@ -184,7 +193,7 @@ dialog .two { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 #toast { position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%); background: var(--bad); color: #fff; padding: 9px 16px; border-radius: 10px; box-shadow: var(--shadow); z-index: 10; max-width: 90vw; }
 
 @media (max-width: 600px) {
-  .top, .tabs { padding-left: 14px; padding-right: 14px; }
+  .top, .tabs, .clock { padding-left: 14px; padding-right: 14px; }
   main { padding: 4px 14px 50px; }
   dialog .two, .types { grid-template-columns: 1fr; }
 }
