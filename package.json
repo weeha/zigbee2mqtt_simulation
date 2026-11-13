@@ -1,0 +1,20 @@
+{
+  "name": "zigbee2mqtt-simulation",
+  "version": "1.0.0",
+  "description": "Simulates Zigbee2MQTT (bridge + virtual devices) on an MQTT broker, with a web UI",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "broker": "node tools/broker.js"
+  },
+  "dependencies": {
+    "mqtt": "^5.10.0"
+  },
+  "devDependencies": {
+    "aedes": "^0.51.3"
+  }
+}

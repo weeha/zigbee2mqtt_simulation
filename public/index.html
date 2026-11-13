@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Zigbee2MQTT Simulator</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="top">
+    <div class="brand">
+      <svg viewBox="0 0 24 24" width="26" height="26" aria-hidden="true"><path fill="currentColor" d="M4 4h16l-1.2 3H9.6l9.6 10H20l-1 3H4l1.2-3h9.2L4.8 7H4z"/></svg>
+      <div>
+        <h1>Zigbee2MQTT Simulator</h1>
+        <div class="sub" id="summary"></div>
+      </div>
+    </div>
+    <div class="actions">
+      <button class="pill" id="mqtt-status" title="MQTT connection settings"><span class="dot"></span><span id="mqtt-text">connecting…</span></button>
+      <button id="btn-demo" class="ghost">Create demo home</button>
+      <button id="btn-add" class="primary">+ Add device</button>
+    </div>
+  </header>
+
+  <nav class="tabs" role="tablist">
+    <button role="tab" data-tab="devices" aria-selected="true">Devices</button>
+    <button role="tab" data-tab="scenarios" aria-selected="false">Scenarios</button>
+    <button role="tab" data-tab="log" aria-selected="false">MQTT log</button>
+  </nav>
+
+  <main>
+    <section id="tab-devices"></section>
+
+    <section id="tab-scenarios" hidden>
+      <div class="bar">
+        <p class="hint">A scenario replays things happening in the house: windows opening, temperatures changing, buttons being pressed.</p>
+        <button id="btn-scenario" class="primary">+ New scenario</button>
+      </div>
+      <div id="scenario-list"></div>
+    </section>
+
+    <section id="tab-log" hidden>
+      <div class="bar">
+        <input id="log-filter" type="search" placeholder="Filter by topic or payload…">
+        <label class="check"><input id="log-pause" type="checkbox"> Pause</label>
+        <button id="log-clear" class="ghost">Clear</button>
+      </div>
+      <div class="log-wrap"><table class="log"><tbody id="log-body"></tbody></table></div>
+    </section>
+  </main>
+
+  <dialog id="dialog"></dialog>
+  <div id="toast" hidden></div>
+  <script type="module" src="app.js"></script>
+</body>
+</html>

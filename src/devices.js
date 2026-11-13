@@ -1,0 +1,388 @@
+// Device type definitions: what each simulated device exposes (Zigbee2MQTT "exposes"),
+// how it is announced to Home Assistant (MQTT discovery) and how its state changes.
+
+import { hexToRgb, rgbToHex, rgbToXy, xyToRgb, rgbToHs, hsToRgb, kelvinToRgb } from './color.js';
+
+const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+const toNum = (v) => {
+  if (v === null || v === undefined || v === '' || typeof v === 'boolean') return undefined;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : undefined;
+};
+const round = (v, d) => Number(v.toFixed(d));
+
+// ---------------------------------------------------------------- exposes helpers
+const numeric = (name, label, unit, description, extra = {}) => ({
+  type: 'numeric', name, label, property: name, access: 1, unit, description, ...extra,
+});
+const EXP_BATTERY = numeric('battery', 'Battery', '%', 'Remaining battery in %', {
+  value_min: 0, value_max: 100, category: 'diagnostic',
+});
+const EXP_LINKQUALITY = numeric('linkquality', 'Linkquality', 'lqi', 'Link quality (signal strength)', {
+  value_min: 0, value_max: 255, category: 'diagnostic',
+});
+
+const P_BATTERY = { name: 'battery', label: 'Battery', kind: 'number', min: 0, max: 100, step: 1, unit: '%' };
+
+export const COLOR_TEMP_MIN = 153;
+export const COLOR_TEMP_MAX = 500;
+const COLOR_TEMP_PRESETS = { coolest: 153, cool: 250, neutral: 370, warm: 454, warmest: 500 };
+
+export const TYPES = {
+  sensor: {
+    label: 'Temperature & humidity sensor',
+    vendor: 'SONOFF',
+    model: 'SNZB-02',
+    modelId: 'TH01',
+    description: 'Temperature and humidity sensor',
+    powerSource: 'Battery',
+    zigbeeType: 'EndDevice',
+    defaults: () => ({ temperature: 21.5, humidity: 48, battery: 100 }),
+    props: [
+      { name: 'temperature', label: 'Temperature', kind: 'number', min: -20, max: 60, step: 0.1, unit: '°C' },
+      { name: 'humidity', label: 'Humidity', kind: 'number', min: 0, max: 100, step: 0.5, unit: '%' },
+      P_BATTERY,
+    ],
+    exposes: [
+      EXP_BATTERY,
+      numeric('temperature', 'Temperature', '°C', 'Measured temperature value'),
+      numeric('humidity', 'Humidity', '%', 'Measured relative humidity'),
+      EXP_LINKQUALITY,
+    ],
+  },
+
+  light: {
+    label: 'Color light',
+    vendor: 'Philips',
+    model: '9290022166',
+    modelId: 'LCA001',
+    description: 'Hue white and color ambiance E26/E27',
+    powerSource: 'Mains (single phase)',
+    zigbeeType: 'Router',
+    defaults: () => ({
+      state: 'OFF',
+      brightness: 254,
+      color_mode: 'color_temp',
+      color_temp: 370,
+      color: colorFromRgb(...kelvinToRgb(1e6 / 370)),
+    }),
+    props: [
+      { name: 'state', label: 'State', kind: 'enum', values: ['ON', 'OFF', 'TOGGLE'] },
+      { name: 'brightness', label: 'Brightness', kind: 'number', min: 0, max: 254, step: 1 },
+      { name: 'color_temp', label: 'Color temperature', kind: 'number', min: COLOR_TEMP_MIN, max: COLOR_TEMP_MAX, step: 1, unit: 'mired' },
+      { name: 'color', label: 'Color', kind: 'color' },
+    ],
+    exposes: [
+      {
+        type: 'light',
+        features: [
+          { type: 'binary', name: 'state', label: 'State', property: 'state', access: 7, value_on: 'ON', value_off: 'OFF', value_toggle: 'TOGGLE', description: 'On/off state of this light' },
+          { type: 'numeric', name: 'brightness', label: 'Brightness', property: 'brightness', access: 7, value_min: 0, value_max: 254, description: 'Brightness of this light' },
+          {
+            type: 'numeric', name: 'color_temp', label: 'Color temp', property: 'color_temp', access: 7, unit: 'mired',
+            value_min: COLOR_TEMP_MIN, value_max: COLOR_TEMP_MAX, description: 'Color temperature of this light',
+            presets: Object.entries(COLOR_TEMP_PRESETS).map(([name, value]) => ({ name, value, description: `Color temperature ${value} mired` })),
+          },
+          {
+            type: 'composite', name: 'color_xy', label: 'Color (X/Y)', property: 'color', access: 7,
+            description: 'Color of this light in the CIE 1931 color space (x/y)',
+            features: [
+              { type: 'numeric', name: 'x', label: 'X', property: 'x', access: 7 },
+              { type: 'numeric', name: 'y', label: 'Y', property: 'y', access: 7 },
+            ],
+          },
+          {
+            type: 'composite', name: 'color_hs', label: 'Color (HS)', property: 'color', access: 7,
+            description: 'Color of this light expressed as hue/saturation',
+            features: [
+              { type: 'numeric', name: 'hue', label: 'Hue', property: 'hue', access: 7 },
+              { type: 'numeric', name: 'saturation', label: 'Saturation', property: 'saturation', access: 7 },
+            ],
+          },
+        ],
+      },
+      EXP_LINKQUALITY,
+    ],
+  },
+
+  window: {
+    label: 'Window sensor',
+    vendor: 'Aqara',
+    model: 'MCCGQ11LM',
+    modelId: 'lumi.sensor_magnet.aq2',
+    description: 'Door and window sensor',
+    powerSource: 'Battery',
+    zigbeeType: 'EndDevice',
+    defaults: () => ({ contact: true, battery: 100 }),
+    props: [
+      { name: 'contact', label: 'Contact', kind: 'bool', labels: { true: 'closed', false: 'open' } },
+      P_BATTERY,
+    ],
+    exposes: [
+      EXP_BATTERY,
+      { type: 'binary', name: 'contact', label: 'Contact', property: 'contact', access: 1, value_on: false, value_off: true, description: 'Indicates if the contact is closed (= true) or open (= false)' },
+      EXP_LINKQUALITY,
+    ],
+  },
+
+  button: {
+    label: 'Button',
+    vendor: 'Aqara',
+    model: 'WXKG11LM',
+    modelId: 'lumi.remote.b1acn01',
+    description: 'Wireless mini switch',
+    powerSource: 'Battery',
+    zigbeeType: 'EndDevice',
+    actions: ['single', 'double', 'triple', 'quadruple', 'hold', 'release'],
+    defaults: () => ({ battery: 100 }),
+    props: [P_BATTERY],
+    get exposes() {
+      return [
+        EXP_BATTERY,
+        { type: 'enum', name: 'action', label: 'Action', property: 'action', access: 1, values: this.actions, description: 'Triggered action (e.g. a button click)', category: 'diagnostic' },
+        EXP_LINKQUALITY,
+      ];
+    },
+  },
+};
+
+// ---------------------------------------------------------------- state handling
+
+function colorFromRgb(r, g, b) {
+  return { ...rgbToXy(r, g, b), ...rgbToHs(r, g, b) };
+}
+
+function parseColor(c) {
+  if (typeof c === 'string') {
+    const rgb = hexToRgb(c);
+    return rgb ? colorFromRgb(...rgb) : null;
+  }
+  if (!c || typeof c !== 'object') return null;
+  const x = toNum(c.x);
+  const y = toNum(c.y);
+  if (x !== undefined && y !== undefined) {
+    const cx = round(clamp(x, 0, 1), 4);
+    const cy = round(clamp(y, 0, 1), 4);
+    return { x: cx, y: cy, ...rgbToHs(...xyToRgb(cx, cy)) };
+  }
+  if (c.hex !== undefined) return parseColor(String(c.hex));
+  if (typeof c.rgb === 'string') {
+    const parts = c.rgb.split(',').map(toNum);
+    if (parts.length === 3 && parts.every((p) => p !== undefined)) return colorFromRgb(...parts.map((p) => clamp(p, 0, 255)));
+    return null;
+  }
+  const [r, g, b] = [toNum(c.r), toNum(c.g), toNum(c.b)];
+  if (r !== undefined && g !== undefined && b !== undefined) return colorFromRgb(clamp(r, 0, 255), clamp(g, 0, 255), clamp(b, 0, 255));
+  const hue = toNum(c.hue ?? c.h);
+  const sat = toNum(c.saturation ?? c.s);
+  if (hue !== undefined || sat !== undefined) return colorFromRgb(...hsToRgb(hue ?? 0, sat ?? 100));
+  return null;
+}
+
+function applyLight(s, v) {
+  let changed = false;
+  if (v.state !== undefined) {
+    const st = String(v.state).toUpperCase();
+    if (st === 'TOGGLE') { s.state = s.state === 'ON' ? 'OFF' : 'ON'; changed = true; }
+    else if (st === 'ON' || st === 'OFF') { s.state = st; changed = true; }
+  }
+  let b = toNum(v.brightness);
+  if (b === undefined && toNum(v.brightness_percent) !== undefined) b = toNum(v.brightness_percent) * 2.54;
+  if (b !== undefined) {
+    b = clamp(Math.round(b), 0, 254);
+    if (b === 0) s.state = 'OFF';
+    else {
+      s.brightness = b;
+      if (v.state === undefined) s.state = 'ON'; // like a real bulb: a level command switches it on
+    }
+    changed = true;
+  }
+  if (v.color_temp !== undefined) {
+    const ct = toNum(COLOR_TEMP_PRESETS[v.color_temp] ?? v.color_temp);
+    if (ct !== undefined) {
+      s.color_temp = clamp(Math.round(ct), COLOR_TEMP_MIN, COLOR_TEMP_MAX);
+      s.color_mode = 'color_temp';
+      s.color = colorFromRgb(...kelvinToRgb(1e6 / s.color_temp));
+      changed = true;
+    }
+  }
+  if (v.color !== undefined) {
+    const color = parseColor(v.color);
+    if (color) {
+      s.color = color;
+      s.color_mode = 'xy';
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+function parseBool(v) {
+  if (typeof v === 'boolean') return v;
+  const s = String(v).toLowerCase();
+  if (['true', 'closed', 'close', '1', 'on'].includes(s)) return true;
+  if (['false', 'open', 'opened', '0', 'off'].includes(s)) return false;
+  return undefined;
+}
+
+/** Applies a set of values to a device state. Returns true if something was accepted. */
+export function applyValues(dev, values) {
+  if (!values || typeof values !== 'object') return false;
+  const s = dev.state;
+  let changed = false;
+  if (dev.type === 'light') changed = applyLight(s, values);
+  if (dev.type === 'sensor') {
+    const t = toNum(values.temperature);
+    if (t !== undefined) { s.temperature = round(clamp(t, -40, 80), 2); changed = true; }
+    const h = toNum(values.humidity);
+    if (h !== undefined) { s.humidity = round(clamp(h, 0, 100), 2); changed = true; }
+  }
+  if (dev.type === 'window' && values.contact !== undefined) {
+    const c = parseBool(values.contact);
+    if (c !== undefined) { s.contact = c; changed = true; }
+  }
+  if ('battery' in s) {
+    const bat = toNum(values.battery);
+    if (bat !== undefined) { s.battery = clamp(Math.round(bat), 0, 100); changed = true; }
+  }
+  return changed;
+}
+
+/** Colour to show in the web UI for a light. */
+export function lightHex(state) {
+  const rgb = state.color_mode === 'color_temp' ? kelvinToRgb(1e6 / state.color_temp) : xyToRgb(state.color.x, state.color.y);
+  return rgbToHex(...rgb);
+}
+
+// ---------------------------------------------------------------- bridge/devices entry
+
+export function bridgeDeviceEntry(dev) {
+  const t = TYPES[dev.type];
+  return {
+    ieee_address: dev.ieee,
+    type: t.zigbeeType,
+    network_address: dev.network_address,
+    supported: true,
+    friendly_name: dev.friendly_name,
+    disabled: false,
+    definition: {
+      model: t.model,
+      vendor: t.vendor,
+      description: t.description,
+      exposes: t.exposes,
+      options: [],
+      supports_ota: false,
+      source: 'native',
+    },
+    power_source: t.powerSource,
+    model_id: t.modelId,
+    manufacturer: t.vendor,
+    interview_completed: true,
+    interviewing: false,
+    interview_state: 'SUCCESSFUL',
+    endpoints: { 1: { bindings: [], configured_reportings: [], clusters: { input: [], output: [] }, scenes: [] } },
+  };
+}
+
+// ---------------------------------------------------------------- Home Assistant discovery
+
+/**
+ * Returns the retained discovery messages for one device as [{topic, payload}].
+ * ctx: { base, discovery, coordinator, version }
+ */
+export function buildDiscovery(dev, ctx) {
+  const t = TYPES[dev.type];
+  const stateTopic = `${ctx.base}/${dev.friendly_name}`;
+  const common = {
+    availability: [
+      { topic: `${ctx.base}/bridge/state`, value_template: '{{ value_json.state }}' },
+      { topic: `${stateTopic}/availability`, value_template: '{{ value_json.state }}' },
+    ],
+    availability_mode: 'all',
+    device: {
+      identifiers: [`zigbee2mqtt_${dev.ieee}`],
+      name: dev.friendly_name,
+      manufacturer: t.vendor,
+      model: t.description,
+      model_id: t.model,
+      via_device: `zigbee2mqtt_bridge_${ctx.coordinator}`,
+    },
+    origin: { name: 'Zigbee2MQTT Simulator', sw: ctx.version, url: 'https://www.zigbee2mqtt.io' },
+  };
+  const out = [];
+  const add = (component, objectId, payload) =>
+    out.push({
+      topic: `${ctx.discovery}/${component}/${dev.ieee}/${objectId}/config`,
+      payload: { ...common, unique_id: `${dev.ieee}_${objectId}_zigbee2mqtt`, ...payload },
+    });
+  const sensor = (objectId, name, extra) =>
+    add('sensor', objectId, {
+      name,
+      state_topic: stateTopic,
+      value_template: `{{ value_json.${objectId} }}`,
+      state_class: 'measurement',
+      ...extra,
+    });
+
+  if (dev.type === 'sensor') {
+    sensor('temperature', 'Temperature', { device_class: 'temperature', unit_of_measurement: '°C' });
+    sensor('humidity', 'Humidity', { device_class: 'humidity', unit_of_measurement: '%' });
+  }
+  if (dev.type === 'light') {
+    add('light', 'light', {
+      name: null,
+      schema: 'json',
+      state_topic: stateTopic,
+      command_topic: `${stateTopic}/set`,
+      brightness: true,
+      brightness_scale: 254,
+      supported_color_modes: ['xy', 'color_temp'],
+      min_mireds: COLOR_TEMP_MIN,
+      max_mireds: COLOR_TEMP_MAX,
+    });
+  }
+  if (dev.type === 'window') {
+    add('binary_sensor', 'contact', {
+      name: null,
+      state_topic: stateTopic,
+      value_template: '{{ value_json.contact }}',
+      payload_on: false,
+      payload_off: true,
+      device_class: 'window',
+    });
+  }
+  if (dev.type === 'button') {
+    add('event', 'action', {
+      name: 'Action',
+      state_topic: stateTopic,
+      event_types: t.actions,
+      icon: 'mdi:gesture-double-tap',
+      value_template:
+        "{% if value_json.action is defined and value_json.action %}{{ {'event_type': value_json.action} | tojson }}{% endif %}",
+    });
+    for (const action of t.actions) {
+      out.push({
+        topic: `${ctx.discovery}/device_automation/${dev.ieee}/action_${action}/config`,
+        payload: {
+          automation_type: 'trigger',
+          type: 'action',
+          subtype: action,
+          payload: action,
+          topic: `${stateTopic}/action`,
+          device: common.device,
+          origin: common.origin,
+        },
+      });
+    }
+  }
+  if (t.powerSource === 'Battery') {
+    sensor('battery', 'Battery', { device_class: 'battery', unit_of_measurement: '%', entity_category: 'diagnostic' });
+  }
+  sensor('linkquality', 'Linkquality', {
+    unit_of_measurement: 'lqi',
+    icon: 'mdi:signal',
+    entity_category: 'diagnostic',
+    enabled_by_default: false,
+  });
+  return out;
+}
